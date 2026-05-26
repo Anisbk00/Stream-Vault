@@ -370,22 +370,38 @@ export class WebRtcVoiceManager {
   setMuted(muted: boolean): void {
     this.isMuted = muted
     if (muted) {
-      // Release mic entirely — returns iOS AVAudioSession to .playback
-      // mode so movie audio returns to full volume between PTT presses.
       if (this.localStream) {
-        for (const track of this.localStream.getAudioTracks()) {
-          track.stop()
+        // Platform-aware mic release:
+        // - On iOS: stop tracks entirely to return AVAudioSession to .playback
+        //   mode. Without this, movie audio stays ducked between PTT presses.
+        //   Note: iOS actually uses VoiceClipRecorder (not this class), but
+        //   we keep the guard for any edge case where WebRTC is used on iOS.
+        // - On all other platforms: just disable tracks (track.enabled = false).
+        //   This keeps the stream alive for instant unmute on next PTT press,
+        //   avoiding the 200-500ms getUserMedia re-acquisition latency.
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+
+        if (isIOS) {
+          for (const track of this.localStream.getAudioTracks()) {
+            track.stop()
+          }
+          this.localStream = null
+          this.initialized = false
+        } else {
+          // Disable but don't stop — stream stays alive for instant unmute
+          for (const track of this.localStream.getAudioTracks()) {
+            track.enabled = false
+          }
         }
-        this.localStream = null
-        this.initialized = false
       }
     } else if (this.localStream) {
-      // Stream still alive (init happened after mute) — just enable tracks
+      // Stream still alive — just enable tracks (instant on non-iOS)
       for (const track of this.localStream.getAudioTracks()) {
         track.enabled = true
       }
     }
-    // If stream was released (this.localStream === null), the caller
+    // If stream was released (this.localStream === null, iOS path), the caller
     // (sendPttStart) will call init() which re-acquires the mic.
   }
 
@@ -917,6 +933,8 @@ export class WebRtcVoiceManager {
       if (state === 'connected' || state === 'completed') {
         // ICE connection established — audio should flow if tracks are present
         console.log('[WebRTC] Connection established with', remoteUserId)
+        // Reset restart counter on successful connection
+        peer.iceRestartAttempts = 0
       }
       if (state === 'disconnected') {
         // Disconnected — ICE may recover on its own, but don't wait forever.
@@ -926,6 +944,8 @@ export class WebRtcVoiceManager {
         console.warn('[WebRTC] ICE disconnected from', remoteUserId, '— waiting 10s before forcing restart')
         setTimeout(() => {
           if (this.destroyed) return
+          // Check if this peer was cleaned up while we waited
+          if (!this.peerConnections.has(remoteUserId)) return
           const currentState = pc.iceConnectionState
           if (currentState === 'disconnected') {
             console.warn('[WebRTC] ICE still disconnected after 10s for', remoteUserId, '— forcing ICE restart')
@@ -1014,8 +1034,15 @@ export class WebRtcVoiceManager {
       console.log('[WebRTC] ICE restart offer sent to', remoteUserId, '(attempt', peer.iceRestartAttempts, ')')
     } catch (err) {
       console.error(classifySignalingError('ICE restart', remoteUserId, err), '(attempt', peer.iceRestartAttempts, ')')
+      // Destroy and recreate the peer connection (same as >3 threshold path).
+      // Don't just cleanupPeer with no recovery — that permanently kills voice.
       this.cleanupPeer(remoteUserId)
       this.onRemoteStreamRemoved?.(remoteUserId)
+      try {
+        await this.createOffer(remoteUserId)
+      } catch (recreateErr) {
+        console.error('[WebRTC] Failed to recreate peer after ICE restart failure for', remoteUserId, recreateErr)
+      }
     }
   }
 

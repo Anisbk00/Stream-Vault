@@ -14,6 +14,13 @@
  * is sent via the existing Supabase broadcast channel and played on receivers.
  *
  * Non-iOS platforms continue to use real-time WebRTC voice (unchanged).
+ *
+ * PLAYBACK: On iOS, HTMLAudioElement.play() requires a user gesture context.
+ * Voice clips arrive asynchronously via Supabase Broadcast, so there is NO
+ * gesture context — play() always rejects with NotAllowedError. To fix this,
+ * we use the Web Audio API (AudioContext) for playback on iOS. An AudioContext
+ * created during a user gesture (the local PTT press) stays "warm" and can
+ * decode+play audio without gesture context for the entire party session.
  */
 
 // ── iOS Detection ──────────────────────────────────────────
@@ -37,6 +44,47 @@ export interface WpVoiceClipEvent {
   duration: number // recording duration in ms (for speaking indicator timing)
 }
 
+// ── Shared AudioContext for iOS playback ────────────────────
+
+/**
+ * Module-level AudioContext for iOS voice clip playback.
+ * Must be created/resumed during a user gesture (PTT press) to work
+ * without gesture context for subsequent clip playbacks.
+ */
+let _audioCtx: AudioContext | null = null
+
+/** Maximum voice clip base64 size (256KB — prevents DoS via oversized clips) */
+const MAX_CLIP_BASE64_SIZE = 256 * 1024
+
+/**
+ * Initialize or resume the AudioContext. Call this during a user gesture
+ * (e.g., PTT press) so that subsequent playVoiceClip calls work on iOS.
+ */
+export function initAudioContext(): void {
+  try {
+    if (!_audioCtx) {
+      _audioCtx = new AudioContext()
+    }
+    if (_audioCtx.state === 'suspended') {
+      _audioCtx.resume()
+    }
+  } catch {
+    // AudioContext not supported — fallback to HTMLAudioElement
+  }
+}
+
+/**
+ * Clean up the shared AudioContext. Call on party leave.
+ */
+export function cleanupAudioContext(): void {
+  try {
+    if (_audioCtx) {
+      _audioCtx.close()
+      _audioCtx = null
+    }
+  } catch { /* already closed */ }
+}
+
 // ── Voice Clip Recorder ─────────────────────────────────────
 
 /**
@@ -50,6 +98,7 @@ export class VoiceClipRecorder {
   private stream: MediaStream | null = null
   private startTime = 0
   private _mimeType = ''
+  private _recording = false
 
   /** The MIME type used for the last recording (needed for playback info) */
   get mimeType(): string { return this._mimeType }
@@ -60,6 +109,11 @@ export class VoiceClipRecorder {
    * The ducking lasts only for the duration of the recording.
    */
   async startRecording(): Promise<boolean> {
+    // Guard against double-start — abort any existing recording first
+    if (this._recording) {
+      this.abort()
+    }
+
     try {
       // Use conservative constraints to minimize iOS audio session impact:
       // - echoCancellation: false — prevents "voice chat" audio routing
@@ -102,6 +156,7 @@ export class VoiceClipRecorder {
       // Collect data every 100ms for low-latency stop
       this.mediaRecorder.start(100)
       this.startTime = Date.now()
+      this._recording = true
       return true
     } catch {
       return false
@@ -115,6 +170,7 @@ export class VoiceClipRecorder {
   async stopRecording(): Promise<{ blob: Blob; duration: number } | null> {
     return new Promise((resolve) => {
       if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
+        this._recording = false
         resolve(null)
         return
       }
@@ -126,6 +182,7 @@ export class VoiceClipRecorder {
         this.stream?.getTracks().forEach((t) => t.stop())
         this.stream = null
         this.mediaRecorder = null
+        this._recording = false
 
         if (this.chunks.length === 0) {
           resolve(null)
@@ -157,6 +214,7 @@ export class VoiceClipRecorder {
     this.stream?.getTracks().forEach((t) => t.stop())
     this.stream = null
     this.mediaRecorder = null
+    this._recording = false
     this.chunks = []
   }
 }
@@ -164,11 +222,12 @@ export class VoiceClipRecorder {
 // ── Voice Clip Playback ─────────────────────────────────────
 
 /** Currently playing audio elements — keyed by userId for cleanup */
-const _activeClips = new Map<string, HTMLAudioElement>()
+const _activeClips = new Map<string, { audio?: HTMLAudioElement; source?: AudioBufferSourceNode; objectUrl?: string }>()
 
 /**
  * Play a received voice clip from another user.
- * Returns a cleanup function that stops playback and releases resources.
+ * Uses Web Audio API on iOS (AudioContext created during PTT gesture stays warm).
+ * Falls back to HTMLAudioElement on other platforms.
  */
 export function playVoiceClip(
   fromUserId: string,
@@ -176,58 +235,142 @@ export function playVoiceClip(
   mimeType: string,
   onEnded: () => void,
 ): void {
+  // Validate clip size
+  if (!base64Audio || base64Audio.length > MAX_CLIP_BASE64_SIZE) {
+    onEnded()
+    return
+  }
+
   // Stop any currently playing clip from this user
   stopVoiceClip(fromUserId)
 
   try {
-    // Decode base64 → binary → Blob → Object URL
+    // Decode base64 → binary → Blob
     const binaryString = atob(base64Audio)
     const bytes = new Uint8Array(binaryString.length)
     for (let i = 0; i < binaryString.length; i++) {
       bytes[i] = binaryString.charCodeAt(i)
     }
     const blob = new Blob([bytes], { type: mimeType })
-    const url = URL.createObjectURL(blob)
 
-    const audio = new Audio(url)
-    _activeClips.set(fromUserId, audio)
-
-    audio.onended = () => {
-      cleanup()
-      onEnded()
+    // On iOS, use Web Audio API for playback (HTMLAudioElement requires gesture context)
+    if (isIOSDevice() && _audioCtx) {
+      playClipWithAudioContext(fromUserId, blob, onEnded)
+    } else {
+      playClipWithAudioElement(fromUserId, blob, onEnded)
     }
-    audio.onerror = () => {
-      cleanup()
-      onEnded()
-    }
-
-    function cleanup() {
-      _activeClips.delete(fromUserId)
-      audio.onended = null
-      audio.onerror = null
-      try { URL.revokeObjectURL(url) } catch { /* already revoked */ }
-    }
-
-    // Play with user gesture context from PTT button (should work on iOS)
-    audio.play().catch(() => {
-      cleanup()
-      onEnded()
-    })
   } catch {
     onEnded()
   }
 }
 
-/** Stop playing a voice clip from a specific user */
-export function stopVoiceClip(userId: string): void {
-  const audio = _activeClips.get(userId)
-  if (audio) {
+/**
+ * Play a clip using the Web Audio API — works on iOS without gesture context
+ * as long as the AudioContext was created/resumed during a prior user gesture.
+ */
+function playClipWithAudioContext(
+  fromUserId: string,
+  blob: Blob,
+  onEnded: () => void,
+): void {
+  if (!_audioCtx) {
+    // Fallback to AudioElement if context is somehow null
+    playClipWithAudioElement(fromUserId, blob, onEnded)
+    return
+  }
+
+  const reader = new FileReader()
+  reader.onload = () => {
+    if (!_audioCtx || !reader.result) {
+      onEnded()
+      return
+    }
+
+    _audioCtx.decodeAudioData(reader.result as ArrayBuffer, (audioBuffer) => {
+      if (!_audioCtx) {
+        onEnded()
+        return
+      }
+
+      const source = _audioCtx.createBufferSource()
+      source.buffer = audioBuffer
+      source.connect(_audioCtx.destination)
+
+      const entry = { source, objectUrl: undefined as string | undefined }
+      _activeClips.set(fromUserId, entry)
+
+      source.onended = () => {
+        _activeClips.delete(fromUserId)
+        onEnded()
+      }
+
+      source.start()
+    }, () => {
+      // Decode failed — fallback to AudioElement
+      playClipWithAudioElement(fromUserId, blob, onEnded)
+    })
+  }
+  reader.onerror = () => onEnded()
+  reader.readAsArrayBuffer(blob)
+}
+
+/**
+ * Play a clip using HTMLAudioElement — standard path for non-iOS platforms.
+ */
+function playClipWithAudioElement(
+  fromUserId: string,
+  blob: Blob,
+  onEnded: () => void,
+): void {
+  const url = URL.createObjectURL(blob)
+  const audio = new Audio(url)
+  const entry = { audio, objectUrl: url }
+  _activeClips.set(fromUserId, entry)
+
+  const cleanup = () => {
+    _activeClips.delete(fromUserId)
     audio.onended = null
     audio.onerror = null
-    audio.pause()
-    audio.src = ''
-    _activeClips.delete(userId)
+    try { URL.revokeObjectURL(url) } catch { /* already revoked */ }
   }
+
+  audio.onended = () => {
+    cleanup()
+    onEnded()
+  }
+  audio.onerror = () => {
+    cleanup()
+    onEnded()
+  }
+
+  audio.play().catch(() => {
+    cleanup()
+    onEnded()
+  })
+}
+
+/** Stop playing a voice clip from a specific user */
+export function stopVoiceClip(userId: string): void {
+  const entry = _activeClips.get(userId)
+  if (!entry) return
+
+  if (entry.source) {
+    // Web Audio API playback
+    try { entry.source.stop() } catch { /* already stopped */ }
+    try { entry.source.disconnect() } catch { /* already disconnected' */ }
+  }
+  if (entry.audio) {
+    // HTMLAudioElement playback
+    entry.audio.onended = null
+    entry.audio.onerror = null
+    entry.audio.pause()
+    entry.audio.src = ''
+  }
+  // Revoke Object URL to prevent memory leak
+  if (entry.objectUrl) {
+    try { URL.revokeObjectURL(entry.objectUrl) } catch { /* already revoked */ }
+  }
+  _activeClips.delete(userId)
 }
 
 /** Stop all playing voice clips (cleanup on party leave) */

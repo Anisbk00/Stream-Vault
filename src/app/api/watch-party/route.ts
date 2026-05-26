@@ -34,14 +34,45 @@ const admin = supabaseAvailable && supabaseServiceKey
   ? createClient<Database>(supabaseUrl, supabaseServiceKey)
   : null
 
-// ── Auth helper ───────────────────────────────────────────
+// ── Input validation helpers ─────────────────────────────
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const MAX_STRING_LENGTH = 500
+const MAX_CONTENT_TITLE_LENGTH = 200
+const MAX_PARTY_MEMBERS = 20
+
+function validateUuid(v: unknown, field: string): string | undefined {
+  if (typeof v !== 'string' || !UUID_RE.test(v)) return undefined
+  return v
+}
+
+function validateString(v: unknown, maxLength = MAX_STRING_LENGTH): string | undefined {
+  if (typeof v !== 'string' || v.length === 0 || v.length > maxLength) return undefined
+  return v
+}
+
+function validateFiniteNumber(v: unknown, min = 0, max = 1_000_000): number | undefined {
+  if (typeof v !== 'number' || !isFinite(v) || v < min || v > max) return undefined
+  return v
+}
+
+function validateMediaType(v: unknown): 'movie' | 'tv' | undefined {
+  if (v === 'movie' || v === 'tv') return v
+  return undefined
+}
+
+function validateNullableNumber(v: unknown, min = 0, max = 100_000): number | null | undefined {
+  if (v === null || v === undefined) return null
+  if (typeof v === 'number' && isFinite(v) && v >= min && v <= max) return v
+  return undefined
+}
+
+// ── Auth + Membership helpers ────────────────────────────
 
 async function verifyAuth(request: Request, body?: { token?: string }): Promise<{ userId: string; email: string } | null> {
-  // Try Authorization header first (standard fetch calls)
   const authHeader = request.headers.get('Authorization')
   let token = authHeader?.startsWith('Bearer ') ? authHeader.replace('Bearer ', '') : null
 
-  // Fallback: token in body (for navigator.sendBeacon which can't set headers)
   if (!token && body?.token) {
     token = body.token
   }
@@ -53,6 +84,56 @@ async function verifyAuth(request: Request, body?: { token?: string }): Promise<
   if (error || !user) return null
 
   return { userId: user.id, email: user.email ?? '' }
+}
+
+/** Verify that the user is a joined member of the party. Returns party row or error response. */
+async function verifyMembership(userId: string, partyId: string): Promise<{ party: Record<string, unknown> } | NextResponse> {
+  const { data: party, error: partyError } = await admin!
+    .from('watch_parties')
+    .select('*')
+    .eq('id', partyId)
+    .maybeSingle()
+
+  if (partyError || !party) {
+    return NextResponse.json({ error: 'Party not found' }, { status: 404 })
+  }
+
+  if ((party as Record<string, unknown>).status === 'ended') {
+    return NextResponse.json({ error: 'Party has ended' }, { status: 410 })
+  }
+
+  const { data: membership } = await admin!
+    .from('watch_party_members')
+    .select('status')
+    .eq('party_id', partyId)
+    .eq('user_id', userId)
+    .eq('status', 'joined')
+    .maybeSingle()
+
+  if (!membership) {
+    return NextResponse.json({ error: 'You are not a member of this party' }, { status: 403 })
+  }
+
+  return { party }
+}
+
+/** Verify that the user is the host of the party. Returns party row or error response. */
+async function verifyHost(userId: string, partyId: string): Promise<{ party: Record<string, unknown> } | NextResponse> {
+  const { data: party, error: partyError } = await admin!
+    .from('watch_parties')
+    .select('*')
+    .eq('id', partyId)
+    .maybeSingle()
+
+  if (partyError || !party) {
+    return NextResponse.json({ error: 'Party not found' }, { status: 404 })
+  }
+
+  if ((party as Record<string, unknown>).host_id !== userId) {
+    return NextResponse.json({ error: 'Only the host can perform this action' }, { status: 403 })
+  }
+
+  return { party }
 }
 
 // ── Action types ──────────────────────────────────────────
@@ -237,11 +318,11 @@ async function handleCreate(userId: string, body: WpRequest) {
 // ── Action: invite ────────────────────────────────────────
 
 async function handleInvite(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
-  const targetUserId = body.targetUserId as string | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
+  const targetUserId = validateUuid(body.targetUserId, 'targetUserId')
 
   if (!partyId || !targetUserId) {
-    return NextResponse.json({ error: 'Missing partyId or targetUserId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId or targetUserId' }, { status: 400 })
   }
 
   // Step 1: Verify the caller is the host of this party
@@ -259,7 +340,18 @@ async function handleInvite(userId: string, body: WpRequest) {
     return NextResponse.json({ error: 'Only the host can send invitations' }, { status: 403 })
   }
 
-  // Step 2: Check if target user is already in ANY active party
+  // Step 2: Enforce party size limit
+  const { count } = await admin!
+    .from('watch_party_members')
+    .select('*', { count: 'exact', head: true })
+    .eq('party_id', partyId)
+    .in('status', ['joined', 'invited'])
+
+  if ((count ?? 0) >= MAX_PARTY_MEMBERS) {
+    return NextResponse.json({ error: `Party is full (max ${MAX_PARTY_MEMBERS} members)` }, { status: 409 })
+  }
+
+  // Step 3: Check if target user is already in ANY active party
   const { data: targetMemberships } = await admin!
     .from('watch_party_members')
     .select('party_id, status')
@@ -279,7 +371,7 @@ async function handleInvite(userId: string, body: WpRequest) {
     }
   }
 
-  // Step 3: Check if already invited/joined to THIS party
+  // Step 4: Check if already invited/joined to THIS party
   const { data: existing } = await admin!
     .from('watch_party_members')
     .select('id, status')
@@ -296,7 +388,7 @@ async function handleInvite(userId: string, body: WpRequest) {
     }
   }
 
-  // Step 4: Upsert invite record
+  // Step 5: Upsert invite record
   const { error: upsertError } = await admin!
     .from('watch_party_members')
     .upsert(
@@ -313,14 +405,14 @@ async function handleInvite(userId: string, body: WpRequest) {
     return NextResponse.json({ error: upsertError.message || 'Failed to save invitation' }, { status: 500 })
   }
 
-  // Step 5: Fetch target user's profile for the response
+  // Step 6: Fetch target user's profile for the response
   const { data: targetProfile } = await admin!
     .from('profiles')
     .select('id, display_name, avatar_url')
     .eq('id', targetUserId)
     .maybeSingle()
 
-  // Step 6: Fetch host profile for broadcast
+  // Step 7: Fetch host profile for broadcast
   const { data: hostProfile } = await admin!
     .from('profiles')
     .select('id, display_name, avatar_url')
@@ -347,21 +439,27 @@ async function handleInvite(userId: string, body: WpRequest) {
 // ── Action: accept ────────────────────────────────────────
 
 async function handleAccept(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
 
-  // Update member status to joined
-  const { error: updateError } = await admin!
+  // Update member status to joined (only if currently 'invited')
+  const { data: updatedRows, error: updateError } = await admin!
     .from('watch_party_members')
     .update({ status: 'joined', joined_at: new Date().toISOString() })
     .eq('party_id', partyId)
     .eq('user_id', userId)
     .eq('status', 'invited')
+    .select()
 
   if (updateError) {
     return NextResponse.json({ error: updateError.message || 'Failed to join party' }, { status: 500 })
+  }
+
+  // Verify the user was actually invited (update affected 0 rows)
+  if (!updatedRows || updatedRows.length === 0) {
+    return NextResponse.json({ error: 'No pending invitation found for this party' }, { status: 403 })
   }
 
   // Fetch full party data with members
@@ -380,9 +478,9 @@ async function handleAccept(userId: string, body: WpRequest) {
 // ── Action: reject ────────────────────────────────────────
 
 async function handleReject(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
 
   const { error } = await admin!
@@ -401,9 +499,9 @@ async function handleReject(userId: string, body: WpRequest) {
 // ── Action: leave ─────────────────────────────────────────
 
 async function handleLeave(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
 
   const { error } = await admin!
@@ -422,26 +520,31 @@ async function handleLeave(userId: string, body: WpRequest) {
 // ── Action: end ───────────────────────────────────────────
 
 async function handleEnd(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
 
   // Verify caller is the host
-  const { data: party } = await admin!
-    .from('watch_parties')
-    .select('host_id')
-    .eq('id', partyId)
-    .maybeSingle()
+  const hostResult = await verifyHost(userId, partyId)
+  if (hostResult instanceof NextResponse) return hostResult
 
-  if (!party || party.host_id !== userId) {
-    return NextResponse.json({ error: 'Only the host can end the party' }, { status: 403 })
-  }
-
-  await admin!
+  // End the party
+  const { error: endError } = await admin!
     .from('watch_parties')
     .update({ status: 'ended', ended_at: new Date().toISOString() })
     .eq('id', partyId)
+
+  if (endError) {
+    return NextResponse.json({ error: endError.message || 'Failed to end party' }, { status: 500 })
+  }
+
+  // Mark all active members as 'left'
+  await admin!
+    .from('watch_party_members')
+    .update({ status: 'left' })
+    .eq('party_id', partyId)
+    .in('status', ['joined', 'invited'])
 
   return NextResponse.json({ success: true })
 }
@@ -449,31 +552,35 @@ async function handleEnd(userId: string, body: WpRequest) {
 // ── Action: pick-content ──────────────────────────────────
 
 async function handlePickContent(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
 
   // Verify caller is the host
-  const { data: party } = await admin!
-    .from('watch_parties')
-    .select('host_id')
-    .eq('id', partyId)
-    .maybeSingle()
+  const hostResult = await verifyHost(userId, partyId)
+  if (hostResult instanceof NextResponse) return hostResult
 
-  if (!party || party.host_id !== userId) {
-    return NextResponse.json({ error: 'Only the host can pick content' }, { status: 403 })
+  const contentId = validateString(body.contentId)
+  const mediaType = validateMediaType(body.mediaType)
+  const season = validateNullableNumber(body.season)
+  const episode = validateNullableNumber(body.episode)
+  const contentTitle = validateString(body.contentTitle, MAX_CONTENT_TITLE_LENGTH)
+  const contentPoster = validateString(body.contentPoster as string | null | undefined)
+
+  if (!contentId || !mediaType) {
+    return NextResponse.json({ error: 'Missing or invalid contentId or mediaType' }, { status: 400 })
   }
 
   const { error } = await admin!
     .from('watch_parties')
     .update({
-      content_id: body.contentId as string,
-      media_type: body.mediaType as string,
-      season: (body.season as number) ?? null,
-      episode: (body.episode as number) ?? null,
-      content_title: body.contentTitle as string,
-      content_poster: (body.contentPoster as string) ?? null,
+      content_id: contentId,
+      media_type: mediaType,
+      season,
+      episode,
+      content_title: contentTitle ?? null,
+      content_poster: contentPoster ?? null,
     })
     .eq('id', partyId)
 
@@ -487,30 +594,23 @@ async function handlePickContent(userId: string, body: WpRequest) {
 // ── Action: start ─────────────────────────────────────────
 
 async function handleStart(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
-  const currentTime = (body.currentTime as number) ?? 0
+  const partyId = validateUuid(body.partyId, 'partyId')
+  const currentTime = validateFiniteNumber(body.currentTime)
 
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
 
   // Verify caller is the host
-  const { data: party } = await admin!
-    .from('watch_parties')
-    .select('host_id')
-    .eq('id', partyId)
-    .maybeSingle()
-
-  if (!party || party.host_id !== userId) {
-    return NextResponse.json({ error: 'Only the host can start the party' }, { status: 403 })
-  }
+  const hostResult = await verifyHost(userId, partyId)
+  if (hostResult instanceof NextResponse) return hostResult
 
   const { error } = await admin!
     .from('watch_parties')
     .update({
       status: 'playing',
       is_playing: true,
-      playback_time: currentTime,
+      playback_time: currentTime ?? 0,
     })
     .eq('id', partyId)
 
@@ -524,18 +624,22 @@ async function handleStart(userId: string, body: WpRequest) {
 // ── Action: pause ─────────────────────────────────────────
 
 async function handlePause(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
-  const currentTime = body.currentTime as number | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
+  const currentTime = validateFiniteNumber(body.currentTime)
 
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
+
+  // Verify caller is a joined member of this party
+  const memberResult = await verifyMembership(userId, partyId)
+  if (memberResult instanceof NextResponse) return memberResult
 
   const { error } = await admin!
     .from('watch_parties')
     .update({
       is_playing: false,
-      playback_time: currentTime ?? 0,
+      playback_time: currentTime ?? (memberResult.party as Record<string, unknown>).playback_time ?? 0,
       paused_by: userId,
     })
     .eq('id', partyId)
@@ -550,18 +654,22 @@ async function handlePause(userId: string, body: WpRequest) {
 // ── Action: play ──────────────────────────────────────────
 
 async function handlePlay(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
-  const currentTime = body.currentTime as number | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
+  const currentTime = validateFiniteNumber(body.currentTime)
 
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
+
+  // Verify caller is a joined member of this party
+  const memberResult = await verifyMembership(userId, partyId)
+  if (memberResult instanceof NextResponse) return memberResult
 
   const { error } = await admin!
     .from('watch_parties')
     .update({
       is_playing: true,
-      playback_time: currentTime ?? 0,
+      playback_time: currentTime ?? (memberResult.party as Record<string, unknown>).playback_time ?? 0,
       paused_by: null,
     })
     .eq('id', partyId)
@@ -576,16 +684,24 @@ async function handlePlay(userId: string, body: WpRequest) {
 // ── Action: seek ──────────────────────────────────────────
 
 async function handleSeek(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
-  const currentTime = body.currentTime as number | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
+  const currentTime = validateFiniteNumber(body.currentTime)
 
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
+
+  if (currentTime === undefined) {
+    return NextResponse.json({ error: 'Missing or invalid currentTime' }, { status: 400 })
+  }
+
+  // Verify caller is a joined member of this party
+  const memberResult = await verifyMembership(userId, partyId)
+  if (memberResult instanceof NextResponse) return memberResult
 
   const { error } = await admin!
     .from('watch_parties')
-    .update({ playback_time: currentTime ?? 0 })
+    .update({ playback_time: currentTime })
     .eq('id', partyId)
 
   if (error) {
@@ -597,16 +713,20 @@ async function handleSeek(userId: string, body: WpRequest) {
 
 // ── Action: sync ──────────────────────────────────────────
 
-async function handleSync(userId: string, _body: WpRequest) {
-  const partyId = _body.partyId as string | undefined
-  const currentTime = _body.currentTime as number | undefined
-  const isPlaying = _body.isPlaying as boolean | undefined
+async function handleSync(userId: string, body: WpRequest) {
+  const partyId = validateUuid(body.partyId, 'partyId')
+  const currentTime = validateFiniteNumber(body.currentTime)
+  const isPlaying = typeof body.isPlaying === 'boolean' ? body.isPlaying : undefined
 
   if (!partyId) {
-    return NextResponse.json({ error: 'Missing partyId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
 
-  await admin!
+  // Verify caller is a joined member (specifically the host for sync)
+  const hostResult = await verifyHost(userId, partyId)
+  if (hostResult instanceof NextResponse) return hostResult
+
+  const { error } = await admin!
     .from('watch_parties')
     .update({
       playback_time: currentTime ?? 0,
@@ -614,17 +734,21 @@ async function handleSync(userId: string, _body: WpRequest) {
     })
     .eq('id', partyId)
 
+  if (error) {
+    return NextResponse.json({ error: error.message || 'Failed to sync' }, { status: 500 })
+  }
+
   return NextResponse.json({ success: true })
 }
 
 // ── Action: remove-member ─────────────────────────────
 
 async function handleRemoveMember(userId: string, body: WpRequest) {
-  const partyId = body.partyId as string | undefined
-  const targetUserId = body.targetUserId as string | undefined
+  const partyId = validateUuid(body.partyId, 'partyId')
+  const targetUserId = validateUuid(body.targetUserId, 'targetUserId')
 
   if (!partyId || !targetUserId) {
-    return NextResponse.json({ error: 'Missing partyId or targetUserId' }, { status: 400 })
+    return NextResponse.json({ error: 'Missing or invalid partyId or targetUserId' }, { status: 400 })
   }
 
   if (targetUserId === userId) {
@@ -632,15 +756,8 @@ async function handleRemoveMember(userId: string, body: WpRequest) {
   }
 
   // Verify caller is the host
-  const { data: party } = await admin!
-    .from('watch_parties')
-    .select('host_id')
-    .eq('id', partyId)
-    .maybeSingle()
-
-  if (!party || party.host_id !== userId) {
-    return NextResponse.json({ error: 'Only the host can remove members' }, { status: 403 })
-  }
+  const hostResult = await verifyHost(userId, partyId)
+  if (hostResult instanceof NextResponse) return hostResult
 
   const { error } = await admin!
     .from('watch_party_members')

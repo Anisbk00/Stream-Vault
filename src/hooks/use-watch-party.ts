@@ -35,6 +35,8 @@ import {
   playVoiceClip,
   stopAllVoiceClips,
   encodeClipToBase64,
+  initAudioContext,
+  cleanupAudioContext,
   type WpVoiceClipEvent,
 } from '@/lib/voice-clip'
 
@@ -222,11 +224,53 @@ function recreatePartyChannel(): void {
   if (!userId) return
   const profile = useAuthStore.getState().profile
 
+  // Preserve the voice manager across channel recreation.
+  // unsubscribePartyChannel destroys the voice manager, but during
+  // a recreation we only need a new signaling transport — the
+  // existing WebRTC peer connections should survive. Destroying
+  // them mid-PTT causes NPE crashes and permanent voice loss.
+  const savedVoiceManager = _voiceManager
+  const savedVoiceReady = _voiceReady
+
   // Remove dead channel so subscribePartyChannel doesn't early-return.
-  // subscribePartyChannel calls unsubscribePartyChannel which handles
-  // full cleanup (voice manager, intervals, etc.) and re-creates everything.
   _partyChannel = null
+  // Temporarily null the voice manager so unsubscribePartyChannel skips it
+  _voiceManager = null
+  _voiceReady = false
+
   subscribePartyChannel(partyId, userId, profile?.display_name || 'Unknown', profile?.avatar_url || null)
+
+  // subscribePartyChannel creates a new voice manager because _voiceManager
+  // was null. But we want to KEEP the existing one (with its established
+  // peer connections). Restore the saved manager and destroy the new one.
+  if (savedVoiceManager) {
+    if (_voiceManager && _voiceManager !== savedVoiceManager) {
+      // A new manager was created — destroy it and restore the saved one
+      _voiceManager.destroy()
+    }
+    _voiceManager = savedVoiceManager
+    _voiceReady = savedVoiceReady
+    // Update signal sender to use the new channel
+    if (_partyChannel) {
+      _voiceManager.setSignalSender((targetUserId, signal) => {
+        if (!_partyChannel) return
+        let payload: WpWebrtcEvent
+        switch (signal.type) {
+          case 'offer':
+            payload = { t: 'webrtc-offer', targetUserId, fromUserId: userId, sdp: signal.sdp! }
+            break
+          case 'answer':
+            payload = { t: 'webrtc-answer', targetUserId, fromUserId: userId, sdp: signal.sdp! }
+            break
+          case 'ice-candidate':
+            payload = { t: 'webrtc-ice', targetUserId, fromUserId: userId, candidate: signal.candidate! }
+            break
+        }
+        wpBroadcast(_partyChannel!, payload, `webrtc-${payload.t}`)
+      })
+    }
+    console.log('[WatchParty] Preserved voice manager across channel recreation')
+  }
 }
 
 /** Recreate the invites channel when the WebSocket dies. */
@@ -563,7 +607,11 @@ function subscribeInvitesChannel(userId: string) {
   _subscribedUserId = userId
 
   try {
-    _invitesChannel = supabase.channel('wp-invites', {
+    // Per-user invite channel — each user only receives their own invites.
+    // Previous design used a shared 'wp-invites' channel where ALL users
+    // received ALL invite payloads (privacy leak). Now each user subscribes
+    // to their own channel, so they only see invites targeting them.
+    _invitesChannel = supabase.channel(`wp-invites-${userId}`, {
       config: { broadcast: { self: false } },
     })
 
@@ -571,20 +619,25 @@ function subscribeInvitesChannel(userId: string) {
       const event = payload.payload
       const store = useWatchPartyStore.getState()
 
-      if (event.t === 'invite' && event.targetUserId === userId) {
-        store.addInvitation({
-          partyId: event.partyId,
-          hostId: event.hostId,
-          hostName: event.hostName,
-          hostAvatarUrl: event.hostAvatarUrl,
-          memberCount: event.memberCount,
-          receivedAt: Date.now(),
-        })
+      if (event.t === 'invite') {
+        // Double-check targetUserId matches (defense in depth)
+        if (event.targetUserId === userId) {
+          store.addInvitation({
+            partyId: event.partyId,
+            hostId: event.hostId,
+            hostName: event.hostName,
+            hostAvatarUrl: event.hostAvatarUrl,
+            memberCount: event.memberCount,
+            receivedAt: Date.now(),
+          })
+        }
       }
 
-      if (event.t === 'invite-rejected' && event.targetUserId === userId) {
-        toast.info(`${event.displayName} declined your watch party invitation`)
-        store.removeInvitation(event.partyId)
+      if (event.t === 'invite-rejected') {
+        if (event.targetUserId === userId) {
+          toast.info(`${event.displayName} declined your watch party invitation`)
+          store.removeInvitation(event.partyId)
+        }
       }
     })
 
@@ -772,6 +825,13 @@ function subscribePartyChannel(
           break
 
         case 'member-left':
+          // SECURITY: Only accept member-left for the sender themselves, or from the host.
+          // Prevents a member from forging a "member-left" to kick another user.
+          if (store.currentParty && event.userId !== event.leftBy &&
+              event.leftBy !== store.currentParty.hostId) {
+            console.warn('[WatchParty] Rejected forged "member-left" broadcast — sender', event.leftBy, 'tried to remove', event.userId)
+            break
+          }
           if (store.currentParty) {
             store.setMembers(store.currentParty.members.filter((m) => m.userId !== event.userId))
             toast.info(`${event.displayName} left the watch party`)
@@ -842,6 +902,13 @@ function subscribePartyChannel(
           break
 
         case 'paused':
+          // SECURITY: Verify sender is a known member of this party.
+          // Prevents forged pause broadcasts from non-members who
+          // discover the channel name.
+          if (store.currentParty && !store.currentParty.members.some((m) => m.userId === event.pausedBy)) {
+            console.warn('[WatchParty] Rejected forged "paused" broadcast from non-member:', event.pausedBy)
+            break
+          }
           store.setPlaybackState({ isPlaying: false, pausedBy: event.pausedBy, currentTime: event.currentTime })
           store.showPauseNotification({ pausedByName: event.pausedByName, currentTime: event.currentTime })
           break
@@ -921,6 +988,12 @@ function subscribePartyChannel(
           break
 
         case 'ended':
+          // SECURITY: Verify the sender is the host. Any party member could
+          // forge an 'ended' broadcast. Cross-check with the known host ID.
+          if (event.endedBy && store.currentParty && event.endedBy !== store.currentParty.hostId) {
+            console.warn('[WatchParty] Rejected forged "ended" broadcast from non-host:', event.endedBy)
+            break
+          }
           console.log('[WatchParty] Party ended by', event.endedBy)
           toast.info('Watch party has ended')
           // Clean up: leave party, unsubscribe channel, close panel
@@ -1136,12 +1209,19 @@ function subscribePartyChannel(
       if (status === 'SUBSCRIBED') {
         console.log('[WatchParty] Party channel subscribed successfully')
         _restFallbackCount = 0
-        await _partyChannel!.track({
-          userId,
-          displayName,
-          avatarUrl,
-          isTalking: false,
-        })
+        try {
+          await _partyChannel!.track({
+            userId,
+            displayName,
+            avatarUrl,
+            isTalking: false,
+          })
+        } catch (trackErr) {
+          console.error('[WatchParty] Failed to track presence:', trackErr)
+          // Non-fatal: the party channel is still usable for broadcasts,
+          // but presence-based features (talking indicators, member detection)
+          // may not work. The 30s periodic sync provides a fallback.
+        }
         useWatchPartyStore.getState().setConnected(true)
 
         // ── Refresh party state from DB after subscription ──────
@@ -1627,6 +1707,8 @@ function unsubscribePartyChannel() {
   }
   // Stop all playing voice clips
   stopAllVoiceClips()
+  // Clean up shared AudioContext for iOS voice clip playback
+  cleanupAudioContext()
   if (_partyChannel) {
     try { supabase.removeChannel(_partyChannel) } catch { /* already removed */ }
     _partyChannel = null
@@ -1842,22 +1924,35 @@ export function useWatchParty() {
       return false
     }
 
-    // Broadcast invite to target user via shared invites channel
-    if (_invitesChannel) {
-      const store = useWatchPartyStore.getState()
-      const memberCount = store.currentParty?.members.length ?? 1
-      const hostData = result.data.hostProfile as { hostName: string; hostAvatarUrl: string | null } | undefined
+    // Broadcast invite to target user's per-user invites channel.
+    // Each user subscribes to wp-invites-${theirUserId} so they only
+    // receive their own invites (fixes privacy leak from shared channel).
+    const targetInvitesChannel = supabase.channel(`wp-invites-${targetUserId}`, {
+      config: { broadcast: { self: true } },  // self:true so we can send on this channel
+    })
+    const inviteStore = useWatchPartyStore.getState()
+    const memberCount = inviteStore.currentParty?.members.length ?? 1
+    const hostData = result.data.hostProfile as { hostName: string; hostAvatarUrl: string | null } | undefined
 
-      wpBroadcast(_invitesChannel, {
-          t: 'invite',
-          partyId,
-          hostId: user.id,
-          hostName: hostData?.hostName || profile.display_name,
-          hostAvatarUrl: hostData?.hostAvatarUrl || profile.avatar_url,
-          memberCount,
-          targetUserId,
-        } as WpInviteEvent, 'invite')
-    }
+    // Subscribe briefly just to send, then unsubscribe. We don't need to
+    // listen on this channel since it belongs to the target user.
+    targetInvitesChannel.subscribe(async (status) => {
+      if (status === 'SUBSCRIBED') {
+        wpBroadcast(targetInvitesChannel, {
+            t: 'invite',
+            partyId,
+            hostId: user.id,
+            hostName: hostData?.hostName || profile.display_name,
+            hostAvatarUrl: hostData?.hostAvatarUrl || profile.avatar_url,
+            memberCount,
+            targetUserId,
+          } as WpInviteEvent, 'invite')
+        // Unsubscribe after sending — we don't need to stay on this channel
+        setTimeout(() => {
+          try { supabase.removeChannel(targetInvitesChannel) } catch { /* already removed */ }
+        }, 2000)
+      }
+    })
 
     // Add the invited user to local members list immediately
     const store = useWatchPartyStore.getState()
@@ -2220,6 +2315,12 @@ export function useWatchParty() {
     // the session alive permanently. Instead, we record a short clip during
     // PTT hold and forward it via broadcast — mic is freed on release.
     if (isIOSDevice()) {
+      // Initialize Web Audio API context during this user gesture.
+      // On iOS, audio.play() requires a gesture context. The AudioContext
+      // created here stays "warm" and can decode+play voice clips without
+      // gesture context for the entire party session.
+      initAudioContext()
+
       useWatchPartyStore.getState().setVoiceStatus('mic-requesting')
       const recorder = new VoiceClipRecorder()
       _clipRecorder = recorder
