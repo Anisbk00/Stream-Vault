@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://www.themoviedb.org/?language=en-US",
+    "name": "The Movie Database (TMDB)",
+    "snippet": "The Movie Database (TMDB) is a popular, user editable database for movies and TV shows.",
+    "host_name": "www.themoviedb.org",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/Inside4ndroid/TMDB-Embed-API",
+    "name": "Inside4ndroid/TMDB-Embed-API - GitHub",
+    "snippet": "TMDB Embed API. Modern, configurable streaming metadata + source aggregation API with a secure admin panel and multi-key TMDB rotation.",
+    "host_name": "github.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.themoviedb.org/tv/89141/watch?language=en-US",
+    "name": "Where can I watch Endama Tashikh Al The&#39;ab? - TMDB",
+    "snippet": "The Movie Database (TMDB). Overview. Main · Alternative Titles · Awards · Cast ... Arabic. Keywords. No keywords have been added. Content Score. 65. Just a little ...",
+    "host_name": "www.themoviedb.org",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.youtube.com/watch?v=8U3asgO3p4s",
+    "name": "Create a Fully Automated Movie & TV Series Website - YouTube",
+    "snippet": "Build an Autopilot Movie & TV Streaming Website (MTDb + Auto-Embed) Follow this video to launch a fully automated OTT / streaming site where ...",
+    "host_name": "www.youtube.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://apify.com/shahidirfan/themoviedb-scraper",
+    "name": "TheMoviedb Scraper - Apify",
+    "snippet": "Introducing TheMoviedb Scraper! This versatile actor extracts rich movie, TV, and celebrity data from TheMovieDB. It offers two modes: use the official API ...",
+    "host_name": "apify.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.themoviedb.org/keyword/215276-arab-world/movie",
+    "name": "\"arab world\" Movies — The Movie Database (TMDB)",
+    "snippet": "“Arab Movie” brings us the stars and the songs, the convoluted plots, and that fleeting moment when we shared the same cultural heroes as everyone else in the ...",
+    "host_name": "www.themoviedb.org",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.themoviedb.org/talk/6282488420e6a51a182d123e?language=gl-ES",
+    "name": "API for Arabic movies - Talk — The Movie Database (TMDB)",
+    "snippet": "Is there by a chance an API for Arabic movies? ... You can also use the old solution. Filtering by the Original Language is possible. For example, ...",
+    "host_name": "www.themoviedb.org",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://developer.themoviedb.org/reference/movie-watch-providers",
+    "name": "Watch Providers - TMDb API",
+    "snippet": "Watch Providers ... Get the list of streaming providers we have for a movie. Recent Requests. Log in to see full request history ...",
+    "host_name": "developer.themoviedb.org",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.themoviedb.org/movie/1233297-shahid",
+    "name": "Shahid (2024) — The Movie Database (TMDB)",
+    "snippet": "Iranian filmmaker Narges Kalhor is forced to confront her family legacy and German bureaucracy when she seeks to remove an overly symbolic word from her ...",
+    "host_name": "www.themoviedb.org",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.themoviedb.org/list/457-my-movies-arabic",
+    "name": "My Movies - Arabic — The Movie Database (TMDB)",
+    "snippet": "A list for all the Arabic movies I've added to the database. E. A list by Ezzedin. Share. 138. Items on this list. 53%. Average Rating. 225h 34m.",
+    "host_name": "www.themoviedb.org",
+    "rank": 9,
+    "date": "",
+    "favicon": ""
+  }
+]

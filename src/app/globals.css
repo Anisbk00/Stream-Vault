@@ -1,0 +1,537 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary-secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-sv-red: #E50914;
+  --color-sv-red-hover: #F40612;
+  --color-sv-gold: #F5C842;
+  --color-sv-blue: #4A90D9;
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: #080808;
+  --foreground: #F5F5F5;
+  --card: #111111;
+  --card-foreground: #F5F5F5;
+  --popover: #1a1a1a;
+  --popover-foreground: #F5F5F5;
+  --primary: #E50914;
+  --primary-foreground: #ffffff;
+  --secondary: #1a1a1a;
+  --secondary-foreground: #F5F5F5;
+  --muted: #161616;
+  --muted-foreground: #A0A0A0;
+  --accent: #1a1a1a;
+  --accent-foreground: #F5F5F5;
+  --destructive: #E50914;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #E50914;
+  --chart-1: #E50914;
+  --chart-2: #F5C842;
+  --chart-3: #4A90D9;
+  --chart-4: #22c55e;
+  --chart-5: #a855f7;
+  --sidebar: #0a0a0a;
+  --sidebar-foreground: #F5F5F5;
+  --sidebar-primary: #E50914;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #1a1a1a;
+  --sidebar-accent-foreground: #F5F5F5;
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-ring: #E50914;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+/* Hide scrollbar on mobile */
+@media (max-width: 767px) {
+  ::-webkit-scrollbar {
+    display: none;
+  }
+  * {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* Shimmer animation for skeletons */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04) 25%,
+    rgba(255, 255, 255, 0.08) 50%,
+    rgba(255, 255, 255, 0.04) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
+/* Hero gradient overlay */
+.hero-gradient-bottom {
+  background: linear-gradient(
+    to top,
+    #080808 0%,
+    rgba(8, 8, 8, 0.95) 15%,
+    rgba(8, 8, 8, 0.7) 40%,
+    rgba(8, 8, 8, 0.2) 70%,
+    transparent 100%
+  );
+}
+
+.hero-gradient-left {
+  background: linear-gradient(
+    to right,
+    rgba(8, 8, 8, 0.9) 0%,
+    rgba(8, 8, 8, 0.6) 30%,
+    transparent 60%
+  );
+}
+
+/* Card hover glow effect */
+.card-glow {
+  transition: all 0.3s ease;
+}
+
+.card-glow:hover {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.1);
+  transform: scale(1.04);
+}
+
+/* Horizontal scroll snap for content rows */
+.scroll-row {
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.scroll-row > * {
+  scroll-snap-align: start;
+}
+
+/* Video player styles */
+.video-player-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+}
+
+.video-player-container video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* Custom subtitle rendering */
+.subtitle-overlay {
+  position: absolute;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  text-align: center;
+  z-index: 20;
+  pointer-events: none;
+  max-width: 80%;
+}
+
+.subtitle-text {
+  display: inline-block;
+  padding: 4px 12px;
+  font-size: 1.2rem;
+  line-height: 1.5;
+  color: #fff;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.9), 0 0 4px rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 4px;
+}
+
+/* Progress bar for video player */
+.player-progress {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  cursor: pointer;
+  transition: height 0.1s ease;
+}
+
+.player-progress:hover {
+  height: 8px;
+}
+
+.player-progress::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #E50914;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.player-progress:hover::-webkit-slider-thumb {
+  opacity: 1;
+}
+
+.player-progress::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: #E50914;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.player-progress:hover::-moz-range-thumb {
+  opacity: 1;
+}
+
+/* Glass effect */
+.glass {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+
+/* Safe area for mobile */
+.safe-bottom {
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.safe-top {
+  padding-top: max(0.25rem, env(safe-area-inset-top));
+}
+
+.safe-left {
+  padding-left: max(0rem, env(safe-area-inset-left));
+}
+
+.safe-right {
+  padding-right: max(0rem, env(safe-area-inset-right));
+}
+
+/* ─── Native fullscreen feel ─────────────────────────────────────── */
+
+/* Prevent bounce / overscroll — keep native scroll performance */
+html {
+  overscroll-behavior: none;
+  -webkit-overflow-scrolling: touch;
+  /* Use 100dvh with safe-area support for PWA standalone.
+   * In standalone mode, the viewport includes safe areas but
+   * height: 100% doesn't extend into them, causing a black gap. */
+  height: 100%;
+  width: 100%;
+  overflow-x: hidden;
+  background: #080808; /* Safety net: fill any viewport edge gaps */
+}
+
+body {
+  overscroll-behavior-y: contain;
+  -webkit-overflow-scrolling: touch;
+  height: 100%;
+  width: 100%;
+  overflow-x: hidden;
+  margin: 0;
+  padding: 0;
+}
+
+/* Remove default tap highlight on iOS */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Prevent pull-to-refresh in browsers — handled by html overscroll */
+
+/* Full height with safe area awareness — exact fit for PWA */
+.native-full-height {
+  height: 100dvh;
+  min-height: 100dvh;
+  max-height: 100dvh;
+  overflow-x: hidden;
+  width: 100%;
+}
+
+/* Ensure Next.js root fills viewport including safe areas */
+#__next,
+html > body > div:first-child {
+  min-height: 100dvh;
+  min-height: -webkit-fill-available;
+  width: 100%;
+}
+
+.native-full-width {
+  width: 100%;
+  max-width: 100dvw;
+}
+
+/* Prevent text selection on UI elements (native feel) */
+.select-none-native {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Immersive status bar area — used by navbar */
+.status-bar-spacer {
+  height: env(safe-area-inset-top, 0px);
+  min-height: env(safe-area-inset-top, 0px);
+}
+
+/* Immersive home indicator area — used by bottom nav */
+.home-indicator-spacer {
+  height: env(safe-area-inset-bottom, 0px);
+  min-height: env(safe-area-inset-bottom, 0px);
+}
+
+/* Fullscreen immersive overlay */
+.immersive-fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  width: 100vw;
+  height: 100dvh;
+  z-index: 9999;
+}
+
+/* Smooth momentum scrolling for content areas */
+.momentum-scroll {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  will-change: scroll-position;
+}
+
+/* Hide scrollbar completely for native feel */
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Prevent iOS rubber banding on specific containers */
+.no-bounce {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+/* ─── Performance ──────────────────────────────────────────────── */
+
+/* GPU layer for fixed position elements */
+header,
+nav,
+video,
+iframe {
+  will-change: auto;
+}
+
+/* Composite-only animations — never trigger layout */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.page-enter {
+  animation: fadeIn 0.2s ease forwards;
+  will-change: opacity;
+}
+
+/* Genre chip styles */
+.genre-chip {
+  transition: all 0.2s ease;
+}
+
+.genre-chip:hover {
+  background: rgba(229, 9, 20, 0.2);
+  border-color: #E50914;
+  color: #E50914;
+}
+
+/* Episode card */
+.episode-card {
+  transition: all 0.2s ease;
+}
+
+.episode-card:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Fade in animation */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease forwards;
+}
+
+/* Slide up animation */
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-slide-up {
+  animation: slideUp 0.5s ease forwards;
+}
+
+/* Hero text animation */
+@keyframes heroFade {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-hero-fade {
+  animation: heroFade 0.8s ease forwards;
+}
+
+.animate-hero-fade-delay-1 {
+  animation: heroFade 0.8s 0.1s ease forwards;
+  opacity: 0;
+}
+
+.animate-hero-fade-delay-2 {
+  animation: heroFade 0.8s 0.2s ease forwards;
+  opacity: 0;
+}
+
+.animate-hero-fade-delay-3 {
+  animation: heroFade 0.8s 0.3s ease forwards;
+  opacity: 0;
+}
+
+/* Smooth page transitions */
+.page-enter {
+  animation: pageSlideIn 0.35s cubic-bezier(0.32, 0.72, 0, 1) forwards;
+}
+
+@keyframes pageSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Native-feel active states */
+@supports (pressure: fine) {
+  .press-effect:active {
+    transform: scale(0.97);
+    opacity: 0.8;
+  }
+}
+
+@supports not (pressure: fine) {
+  .press-effect:active {
+    transform: scale(0.97);
+    opacity: 0.8;
+  }
+}

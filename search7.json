@@ -1,0 +1,47 @@
+[
+  {
+    "url": "https://superuser.com/questions/927523/how-to-download-only-subtitles-of-videos-using-youtube-dl",
+    "name": "How to download only subtitles of videos using youtube-dl",
+    "snippet": "Another simple way to download subtitles from YouTube is to download Google2SRT. Google2SRT is a free, open source program for Windows, Mac and ...",
+    "host_name": "superuser.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/youtubedl/comments/1pkqq5y/downloading_multiple_subtitles_audio_streams",
+    "name": "Downloading multiple subtitles & audio streams within the same mkv",
+    "snippet": "New here, sorry if I'm doing something obviously wrong. I'm using yt-dlp-gui to download files with multiple audio tracks & subtitles to the ...",
+    "host_name": "www.reddit.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://packages.debian.org/bullseye/youtube-dl",
+    "name": "Debian -- Details of package youtube-dl in bullseye",
+    "snippet": "youtube-dl is a small command-line program to download videos from YouTube.com and other sites that don't provide direct links to the videos served.",
+    "host_name": "packages.debian.org",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.facebook.com/groups/FilmmakersColorado/posts/1463984407303560",
+    "name": "What's a software that you like for downloading Youtube videos? (PC)",
+    "snippet": "Hi, i tried this great free software to download videos from YouTube : 4K Video Downloader is the best free tool around for quick, fuss-free ...",
+    "host_name": "www.facebook.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/DataHoarder/comments/8sdzew/trying_to_download_series_from_crunchyroll_with",
+    "name": "Trying to download series from crunchyroll with english subtitles",
+    "snippet": "Trying to download series from crunchyroll with english subtitles embedded in the video ... download movies/shows with arabic subtitles to watch ...",
+    "host_name": "www.reddit.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  }
+]
