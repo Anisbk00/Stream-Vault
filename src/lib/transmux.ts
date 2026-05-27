@@ -43,7 +43,7 @@ export async function transmuxWholeBlob(
   const transmuxer = new Transmuxer({
     remux: true,
     alignGopsAtEnd: false,
-    keepOriginalTimestamps: true,
+    keepOriginalTimestamps: false,
   });
 
   let initSegment: Uint8Array | null = null;
@@ -118,7 +118,7 @@ async function transmuxSingleSegment(
     const transmuxer = new Transmuxer({
       remux: true,
       alignGopsAtEnd: false,
-      keepOriginalTimestamps: true,
+      keepOriginalTimestamps: false,
     });
 
     let initSeg: Uint8Array | null = null;

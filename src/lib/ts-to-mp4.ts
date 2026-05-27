@@ -69,7 +69,7 @@ export async function remuxTsToMp4(
 
   const transmuxer = new muxjs.mp4.Transmuxer({
     remux: true,
-    keepOriginalTimestamps: true,
+    keepOriginalTimestamps: false,
     alignGopsAtEnd: false,
   });
 

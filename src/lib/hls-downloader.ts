@@ -625,93 +625,76 @@ export async function startDownload(
     // Step 3: Download subtitles if available
     const subtitles: Record<string, string> = {};
     if (subtitleTracks && subtitleTracks.length > 0) {
-      // Try to find subtitle group URI from the master manifest
-      const subGroupLine = manifestContent.split('\n').find(
-        (l) => l.includes('#EXT-X-MEDIA') && l.includes('TYPE=SUBTITLES') && l.includes('URI=')
-      );
-      if (subGroupLine) {
-        const uriMatch = subGroupLine.match(/URI="([^"]*)"/);
-        if (uriMatch) {
-          const subPlaylistUrl = resolveUrl(task.url, uriMatch[1]);
-          try {
-            const subPlaylistResp = await fetchWithRetry(proxyUrl(subPlaylistUrl, referer), abortSignal);
-            const subPlaylistText = await subPlaylistResp.text();
-            const subPlaylistLines = subPlaylistText.split('\n').map(l => l.trim()).filter(Boolean);
+      // Download each subtitle track independently using its own URI from
+      // the #EXT-X-MEDIA tag in the master manifest. Previously this code
+      // required a single "subGroupLine" with URI= to exist, which blocked
+      // all subtitle downloads when the first EXT-X-MEDIA line didn't have
+      // a URI attribute (some manifests use GROUP-ID references instead).
+      for (const subTrack of subtitleTracks) {
+        // Filter by user's preferred subtitle languages (if set)
+        // Empty preferredSubtitles = download all available
+        if (preferredSubtitles && preferredSubtitles.length > 0 && !preferredSubtitles.includes(subTrack.language)) continue;
+        const lang = subTrack.language;
+        // Find the subtitle media tag for this language
+        const mediaLine = manifestContent.split('\n').find(
+          (l) => l.includes('#EXT-X-MEDIA') && l.includes('TYPE=SUBTITLES') && l.includes(`LANGUAGE="${lang}"`)
+        );
+        if (!mediaLine) continue;
 
-            // Download each subtitle segment and merge into a single VTT
-            for (const subTrack of subtitleTracks) {
-              // Filter by user's preferred subtitle languages (if set)
-              // Empty preferredSubtitles = download all available
-              if (preferredSubtitles && preferredSubtitles.length > 0 && !preferredSubtitles.includes(subTrack.language)) continue;
-              const lang = subTrack.language;
-              // Find the subtitle media tag for this language to get its GROUP-ID
-              const mediaLine = manifestContent.split('\n').find(
-                (l) => l.includes('#EXT-X-MEDIA') && l.includes('TYPE=SUBTITLES') && l.includes(`LANGUAGE="${lang}"`)
-              );
-              if (!mediaLine) continue;
+        // Find URI for this specific track
+        const trackUriMatch = mediaLine.match(/URI="([^"]*)"/);
+        if (!trackUriMatch) continue;
 
-              const groupIdMatch = mediaLine.match(/GROUP-ID="([^"]*)"/);
-              if (!groupIdMatch) continue;
+        const trackPlaylistUrl = resolveUrl(task.url, trackUriMatch[1]);
+        try {
+          const trackResp = await fetchWithRetry(proxyUrl(trackPlaylistUrl, referer), abortSignal);
+          const trackText = await trackResp.text();
+          const trackLines = trackText.split('\n').map(l => l.trim()).filter(Boolean);
 
-              // Find URI for this specific group
-              const trackUriMatch = mediaLine.match(/URI="([^"]*)"/);
-              if (!trackUriMatch) continue;
+          // Collect subtitle segment URLs
+          const subSegments: string[] = [];
+          for (let i = 0; i < trackLines.length; i++) {
+            if (!trackLines[i].startsWith('#') && trackLines[i].includes('.')) {
+              subSegments.push(resolveUrl(trackPlaylistUrl, trackLines[i]));
+            }
+          }
 
-              const trackPlaylistUrl = resolveUrl(task.url, trackUriMatch[1]);
+          if (subSegments.length > 0) {
+            // Download all subtitle segments and merge
+            let mergedVtt = 'WEBVTT\n\n';
+            let cumulOffset = 0;
+
+            for (const segUrl of subSegments) {
               try {
-                const trackResp = await fetchWithRetry(proxyUrl(trackPlaylistUrl, referer), abortSignal);
-                const trackText = await trackResp.text();
-                const trackLines = trackText.split('\n').map(l => l.trim()).filter(Boolean);
+                const segResp = await fetchWithRetry(proxyUrl(segUrl, referer), abortSignal);
+                let segText = await segResp.text();
 
-                // Collect subtitle segment URLs
-                const subSegments: string[] = [];
-                for (let i = 0; i < trackLines.length; i++) {
-                  if (!trackLines[i].startsWith('#') && trackLines[i].includes('.')) {
-                    subSegments.push(resolveUrl(trackPlaylistUrl, trackLines[i]));
-                  }
+                // Strip WEBVTT header from subsequent segments
+                if (mergedVtt.length > 8) {
+                  segText = segText.replace(/^WEBVTT[^\n]*\n*/i, '');
                 }
 
-                if (subSegments.length > 0) {
-                  // Download all subtitle segments and merge
-                  let mergedVtt = 'WEBVTT\n\n';
-                  let cumulOffset = 0;
-
-                  for (const segUrl of subSegments) {
-                    try {
-                      const segResp = await fetchWithRetry(proxyUrl(segUrl, referer), abortSignal);
-                      let segText = await segResp.text();
-
-                      // Strip WEBVTT header from subsequent segments
-                      if (mergedVtt.length > 8) {
-                        segText = segText.replace(/^WEBVTT[^\n]*\n*/i, '');
-                      }
-
-                      // Adjust timestamps if there are multiple segments
-                      if (subSegments.length > 1 && cumulOffset > 0) {
-                        segText = adjustVttTimestamps(segText, cumulOffset);
-                      }
-
-                      // Estimate duration from last timestamp for offset calc
-                      const lastTs = parseLastVttTimestamp(segText);
-                      cumulOffset += lastTs;
-
-                      mergedVtt += segText + '\n';
-                    } catch {
-                      // Skip failed subtitle segments — non-critical
-                    }
-                  }
-
-                  if (mergedVtt.length > 10) {
-                    subtitles[lang] = mergedVtt;
-                  }
+                // Adjust timestamps if there are multiple segments
+                if (subSegments.length > 1 && cumulOffset > 0) {
+                  segText = adjustVttTimestamps(segText, cumulOffset);
                 }
+
+                // Estimate duration from last timestamp for offset calc
+                const lastTs = parseLastVttTimestamp(segText);
+                cumulOffset += lastTs;
+
+                mergedVtt += segText + '\n';
               } catch {
-                // Skip failed subtitle track — non-critical
+                // Skip failed subtitle segments — non-critical
               }
             }
-          } catch {
-            // Subtitle download failed — continue without subtitles
+
+            if (mergedVtt.length > 10) {
+              subtitles[lang] = mergedVtt;
+            }
           }
+        } catch {
+          // Skip failed subtitle track — non-critical
         }
       }
     }
@@ -834,12 +817,14 @@ export function formatEta(seconds: number): string {
 
 /** Parse the last timestamp from a VTT segment to calculate cumulative offset */
 function parseLastVttTimestamp(vtt: string): number {
-  const matches = vtt.matchAll(/(\d{2}):(\d{2}):(\d{2})\.(\d{3})/g);
+  // Match both HH:MM:SS.mmm and MM:SS.mmm formats
+  const matches = vtt.matchAll(/(\d{2}):(\d{2})(?::(\d{2}))?\.(\d{3})/g);
   let lastMs = 0;
   for (const m of matches) {
-    const h = parseInt(m[1], 10);
-    const min = parseInt(m[2], 10);
-    const s = parseInt(m[3], 10);
+    const hasHours = m[3] !== undefined;
+    const h = hasHours ? parseInt(m[1], 10) : 0;
+    const min = hasHours ? parseInt(m[2], 10) : parseInt(m[1], 10);
+    const s = hasHours ? parseInt(m[3], 10) : parseInt(m[2], 10);
     const ms = parseInt(m[4], 10);
     lastMs = Math.max(lastMs, h * 3600000 + min * 60000 + s * 1000 + ms);
   }
@@ -848,10 +833,16 @@ function parseLastVttTimestamp(vtt: string): number {
 
 /** Adjust all timestamps in a VTT segment by adding an offset in ms */
 function adjustVttTimestamps(vtt: string, offsetMs: number): string {
+  // Match both HH:MM:SS.mmm and MM:SS.mmm formats
   return vtt.replace(
-    /(\d{2}):(\d{2}):(\d{2})\.(\d{3})/g,
-    (_match, h, m, s, ms) => {
-      let totalMs = parseInt(h, 10) * 3600000 + parseInt(m, 10) * 60000 + parseInt(s, 10) * 1000 + parseInt(ms, 10);
+    /(\d{2}):(\d{2})(?::(\d{2}))?\.(\d{3})/g,
+    (_match, p1, p2, p3, p4) => {
+      const hasHours = p3 !== undefined;
+      const h = hasHours ? parseInt(p1, 10) : 0;
+      const min = hasHours ? parseInt(p2, 10) : parseInt(p1, 10);
+      const s = hasHours ? parseInt(p3, 10) : parseInt(p2, 10);
+      const ms = parseInt(p4, 10);
+      let totalMs = h * 3600000 + min * 60000 + s * 1000 + ms;
       totalMs += offsetMs;
       const newH = Math.floor(totalMs / 3600000);
       totalMs %= 3600000;
@@ -859,6 +850,7 @@ function adjustVttTimestamps(vtt: string, offsetMs: number): string {
       totalMs %= 60000;
       const newS = Math.floor(totalMs / 1000);
       const newMs = totalMs % 1000;
+      // Always output in HH:MM:SS.mmm format for consistency
       return `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}:${String(newS).padStart(2, '0')}.${String(newMs).padStart(3, '0')}`;
     }
   );
