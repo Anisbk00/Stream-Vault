@@ -164,6 +164,12 @@ export async function fetchExternalSubtitles(
     }
 
     const data = await resp.json();
+
+    // Log the detail message from the server (includes missing API key info)
+    if (data?.detail) {
+      console.log(`[SV Subtitles] Server detail: ${data.detail}`);
+    }
+
     const subs = data?.subtitles as Array<{
       lang: string;
       url?: string;

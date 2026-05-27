@@ -1599,6 +1599,41 @@ function HlsVideoPlayer({
         `buffered=${video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1).toFixed(3) : 'none'}s, ` +
         `duration=${video.duration?.toFixed(3)}s`,
       );
+
+      // ── Blob URL stall recovery ──────────────────────────────────────
+      // Chrome sometimes stalls on blob URL playback of fMP4 files — the
+      // video freezes but audio may continue, or both freeze. This happens
+      // because Chrome's media pipeline loses sync with the fragmented MP4
+      // box structure. A small seek (0.1s forward) forces Chrome to
+      // re-initialize the decoder at the new position, which often recovers.
+      //
+      // Only attempt recovery if:
+      // 1. The video appears to have data available (buffered ahead > 0)
+      // 2. We haven't already attempted recovery recently (5s cooldown)
+      // 3. The video is not genuinely at the end
+      if (video.src.startsWith('blob:') && !video.ended && video.duration > 0) {
+        const bufferedAhead = video.buffered.length > 0
+          ? video.buffered.end(video.buffered.length - 1) - video.currentTime
+          : 0;
+
+        if (bufferedAhead > 0.5) {
+          // Check cooldown — don't try recovery more than once every 5s
+          const now = Date.now();
+          const lastRecovery = (video as HTMLVideoElement & { _svLastStallRecovery?: number })._svLastStallRecovery ?? 0;
+          if (now - lastRecovery > 5000) {
+            (video as HTMLVideoElement & { _svLastStallRecovery?: number })._svLastStallRecovery = now;
+            console.log(`[SV Player] Attempting blob URL stall recovery — seeking +0.1s from ${video.currentTime.toFixed(3)}s`);
+            const targetTime = video.currentTime + 0.1;
+            video.currentTime = targetTime;
+            // If seeking doesn't help, try play() again after a short delay
+            setTimeout(() => {
+              if (video.paused && !video.ended) {
+                video.play().catch(() => {});
+              }
+            }, 500);
+          }
+        }
+      }
     };
     const onCanPlay = () => setLoading(false);
     const onError = () => {

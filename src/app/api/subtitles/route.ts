@@ -22,6 +22,11 @@ const SUBDL_API_KEY = process.env.SUBDL_API_KEY || '';
 const OPENSUBTITLES_API_KEY = process.env.OPENSUBTITLES_API_KEY || '';
 const TMDB_API_KEY = process.env.TMDB_API_KEY || '';
 
+// Log missing API keys at startup to help diagnose subtitle download failures
+if (!TMDB_API_KEY) console.warn('[SV Subtitles] TMDB_API_KEY not configured — cannot resolve TMDB→IMDB IDs for subtitle search');
+if (!SUBDL_API_KEY) console.warn('[SV Subtitles] SUBDL_API_KEY not configured — SubDL subtitle search disabled');
+if (!OPENSUBTITLES_API_KEY) console.warn('[SV Subtitles] OPENSUBTITLES_API_KEY not configured — OpenSubtitles search disabled');
+
 async function getImdbIdFromTmdb(tmdbId: string, type: 'movie' | 'tv'): Promise<string | null> {
   if (!TMDB_API_KEY) return null;
   try {
@@ -176,8 +181,16 @@ export async function GET(request: NextRequest) {
   }
 
   if (!resolvedImdbId) {
+    const missingKeys: string[] = [];
+    if (!TMDB_API_KEY) missingKeys.push('TMDB_API_KEY');
     return NextResponse.json(
-      { error: 'Could not resolve IMDB ID', subtitles: [] },
+      {
+        error: 'Could not resolve IMDB ID',
+        detail: missingKeys.length > 0
+          ? `Missing API keys: ${missingKeys.join(', ')}. Configure these in .env to enable subtitle search.`
+          : 'TMDB API returned no IMDB ID for this content',
+        subtitles: [],
+      },
       { status: 404, headers: getCorsHeaders() },
     );
   }

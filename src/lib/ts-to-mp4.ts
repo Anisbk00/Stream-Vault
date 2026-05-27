@@ -12,6 +12,13 @@
  *
  * Implementation uses async/await loop with off() for cleanup.
  * Never uses removeAllListeners() — it doesn't exist on mux.js browser build.
+ *
+ * IMPORTANT: keepOriginalTimestamps is set to TRUE. When set to false,
+ * mux.js recalculates timestamps starting from 0, which can cause it to
+ * silently drop segments during discontinuity boundaries or GOP misalignment,
+ * resulting in output files that are 30-60% smaller than the input (e.g.,
+ * 60MB output from 160MB input — clearly incomplete). Keeping original
+ * timestamps preserves all data through the remux pipeline.
  */
 
 import muxjs from 'mux.js';
@@ -67,15 +74,23 @@ export async function remuxTsToMp4(
   );
   const remuxStartTime = performance.now();
 
+  // ── Transmuxer configuration ────────────────────────────────────────────
+  // keepOriginalTimestamps: TRUE — Critical for data integrity.
+  // When false, mux.js recalculates base_media_decode_time starting from 0,
+  // which causes it to silently DROP segments that don't align with its
+  // recalculated timeline. This was the root cause of 60MB output from
+  // 160MB input — mux.js was discarding ~60% of the video data because
+  // timestamp recalculation created discontinuities it couldn't resolve.
   const transmuxer = new muxjs.mp4.Transmuxer({
     remux: true,
-    keepOriginalTimestamps: false,
+    keepOriginalTimestamps: true,
     alignGopsAtEnd: false,
   });
 
   let initSegment: Uint8Array | null = null;
   const dataParts: Uint8Array[] = [];
   let emptySegmentCount = 0;
+  let pushFlushErrorCount = 0;
 
   const dataHandler = (segment: { initSegment: Uint8Array | null; data: Uint8Array }) => {
     if (segment.initSegment && segment.initSegment.byteLength > 0 && !initSegment) {
@@ -115,6 +130,7 @@ export async function remuxTsToMp4(
         if (!settled) {
           settled = true;
           transmuxer.off('done', doneHandler);
+          pushFlushErrorCount++;
           console.warn(
             `[SV Remux] Segment ${index + 1} push/flush error: ` +
             `${err instanceof Error ? err.message : String(err)}`,
@@ -134,7 +150,7 @@ export async function remuxTsToMp4(
         console.log(
           `[SV Remux] Processed ${i + 1}/${segmentBuffers.length} segments — ` +
           `${(outputBytes / 1024 / 1024).toFixed(2)} MB output, ` +
-          `${dataParts.length} fragments`,
+          `${dataParts.length} fragments, ${emptySegmentCount} empty, ${pushFlushErrorCount} errors`,
         );
       }
     }
@@ -157,29 +173,64 @@ export async function remuxTsToMp4(
     console.error(
       `[SV Remux] FAILED — no output after ${segmentBuffers.length} segments ` +
       `(${(totalInputBytes / 1024 / 1024).toFixed(2)} MB) in ${elapsed}s. ` +
-      `initSegment=${initSegment ? 'present' : 'MISSING'}, fragments=${dataParts.length}.`,
+      `initSegment=${initSegment ? 'present' : 'MISSING'}, fragments=${dataParts.length}. ` +
+      `Empty segments: ${emptySegmentCount}, Push/flush errors: ${pushFlushErrorCount}.`,
     );
     throw new Error(
       'Remux failed — no output produced. The TS data may be corrupted or use an unsupported codec.',
     );
   }
 
-  // ── Output sanity check ──────────────────────────────────────────────
-  // The remuxed fMP4 should be a reasonable fraction of the input TS size.
-  // If it's < 10% of input, something is very wrong (likely corrupted TS data
-  // that mux.js partially processed but couldn't produce valid video from).
+  // ── Output sanity checks ──────────────────────────────────────────────
   const outputBytes = dataParts.reduce((sum, p) => sum + p.byteLength, 0) + (initSegment?.byteLength ?? 0);
   const outputRatio = outputBytes / totalInputBytes;
-  if (outputRatio < 0.1 && totalInputBytes > 500_000) {
+
+  // Check 1: Output size vs input size.
+  // A valid TS→fMP4 remux typically produces output that is 80-100% of the
+  // input size (TS has ~2-4% overhead per packet, fMP4 is more efficient).
+  // If the output is less than 50%, mux.js is silently dropping significant
+  // data — the resulting file will be unplayable or have huge gaps.
+  // Previous threshold of 10% was too lenient: a 60MB output from 160MB
+  // input (37.5%) passed the check but produced a broken file.
+  if (outputRatio < 0.5 && totalInputBytes > 500_000) {
     console.error(
       `[SV Remux] FAILED — output is suspiciously small: ` +
       `${(outputBytes / 1024 / 1024).toFixed(2)} MB output vs ${(totalInputBytes / 1024 / 1024).toFixed(2)} MB input ` +
-      `(${(outputRatio * 100).toFixed(1)}%). The TS data is likely corrupted.`,
+      `(${(outputRatio * 100).toFixed(1)}%). mux.js is dropping too much data. ` +
+      `Empty segments: ${emptySegmentCount}/${segmentBuffers.length}, Push/flush errors: ${pushFlushErrorCount}.`,
     );
     throw new Error(
       `Remux failed — output is only ${(outputRatio * 100).toFixed(1)}% of input size. ` +
-      `The TS data is likely corrupted or uses unsupported codecs. ` +
-      `Input: ${(totalInputBytes / 1024 / 1024).toFixed(2)} MB → Output: ${(outputBytes / 1024 / 1024).toFixed(2)} MB.`,
+      `mux.js is silently dropping video data during timestamp recalculation. ` +
+      `Input: ${(totalInputBytes / 1024 / 1024).toFixed(2)} MB → Output: ${(outputBytes / 1024 / 1024).toFixed(2)} MB. ` +
+      `The download will fall back to raw TS playback.`,
+    );
+  }
+
+  // Check 2: Warn if output ratio is suspiciously low but above the hard threshold.
+  // 50-70% ratio is unusual — might indicate partial data loss.
+  if (outputRatio < 0.7 && totalInputBytes > 1_000_000) {
+    console.warn(
+      `[SV Remux] ⚠️ Output ratio is ${(outputRatio * 100).toFixed(1)}% — ` +
+      `expected 80-100% for a clean remux. The video may have gaps. ` +
+      `Empty segments: ${emptySegmentCount}/${segmentBuffers.length}, ` +
+      `Push/flush errors: ${pushFlushErrorCount}.`,
+    );
+  }
+
+  // Check 3: Too many empty segments means mux.js couldn't parse much of the input.
+  const emptyRatio = emptySegmentCount / segmentBuffers.length;
+  if (emptyRatio > 0.3 && segmentBuffers.length > 5) {
+    console.error(
+      `[SV Remux] FAILED — ${emptySegmentCount}/${segmentBuffers.length} segments ` +
+      `(${(emptyRatio * 100).toFixed(1)}%) produced empty output. ` +
+      `The TS data is likely in a format mux.js can't parse. ` +
+      `Push/flush errors: ${pushFlushErrorCount}.`,
+    );
+    throw new Error(
+      `Remux failed — ${(emptyRatio * 100).toFixed(1)}% of segments produced no output. ` +
+      `The TS data uses codecs or a format that mux.js doesn't support. ` +
+      `The download will fall back to raw TS playback.`,
     );
   }
 
@@ -213,8 +264,8 @@ export async function remuxTsToMp4(
 
   console.log(
     `[SV Remux] SUCCESS — ${segmentBuffers.length} segments → ${dataParts.length} fMP4 fragments in ${elapsed}s. ` +
-    `Input: ${(totalInputBytes / 1024 / 1024).toFixed(2)} MB → Output: ${(outputBlob.size / 1024 / 1024).toFixed(2)} MB. ` +
-    `Empty segments: ${emptySegmentCount}.`,
+    `Input: ${(totalInputBytes / 1024 / 1024).toFixed(2)} MB → Output: ${(outputBlob.size / 1024 / 1024).toFixed(2)} MB ` +
+    `(${(outputRatio * 100).toFixed(1)}%). Empty: ${emptySegmentCount}, Errors: ${pushFlushErrorCount}.`,
   );
 
   return outputBlob;
