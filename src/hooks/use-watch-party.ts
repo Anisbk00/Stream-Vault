@@ -450,6 +450,11 @@ async function wpApi(
 let _lastSyncDbWrite = 0
 const SYNC_DB_DEBOUNCE_MS = 5_000
 
+/** Timestamp of the last content-pick toast — prevents duplicate toasts
+ *  when both Postgres Change and Broadcast arrive for the same content. */
+let _lastContentPickToastAt = 0
+const CONTENT_PICK_TOAST_DEDUP_MS = 3_000
+
 /** Most recent sync broadcast's sentAt timestamp (ms) — used by members for latency compensation */
 let _lastSyncSentAt = 0
 
@@ -939,6 +944,82 @@ function subscribePartyChannel(
       // incoming WebRTC signals can be handled immediately.
     }
 
+    // ── Postgres Changes listener (reliable real-time DB sync) ──────
+    // Supabase Broadcast is fire-and-forget — if the member's WebSocket
+    // isn't connected when the host picks content, the broadcast is lost.
+    // The content-heal interval (3s) is the safety net but too slow.
+    // Postgres Changes are triggered by actual DB writes (from the API),
+    // not client-side broadcasts, making them significantly more reliable.
+    // When the host's pickContent API call updates the DB, this listener
+    // fires and the member receives it near-instantly.
+    _partyChannel.on('postgres_changes',
+      {
+        event: 'UPDATE',
+        schema: 'public',
+        table: 'watch_parties',
+        filter: `id=eq.${partyId}`,
+      },
+      (payload: { new: Record<string, unknown>; old: Record<string, unknown> }) => {
+        const newRow = payload.new
+
+        // ── Content change ──────────────────────────────────
+        // Use FRESH store state for comparison (broadcast may have
+        // arrived between the Postgres Change event and this handler).
+        const freshStore = useWatchPartyStore.getState()
+        if (!freshStore.currentParty) return
+        const dbContentId = newRow.content_id as string | null
+        if (dbContentId && dbContentId !== freshStore.currentParty.contentId) {
+          console.log('[WatchParty] Postgres Change: content updated —', dbContentId)
+          freshStore.setPartyContent({
+            contentId: dbContentId,
+            mediaType: (newRow.media_type as 'movie' | 'tv') ?? 'movie',
+            season: (newRow.season as number) ?? null,
+            episode: (newRow.episode as number) ?? null,
+            contentTitle: (newRow.content_title as string) || '',
+            contentPoster: (newRow.content_poster as string) ?? null,
+          })
+          // Show toast only if the broadcast handler didn't already show
+          // one recently (dedup within CONTENT_PICK_TOAST_DEDUP_MS).
+          const now = Date.now()
+          const contentTitle = (newRow.content_title as string) || ''
+          if (now - _lastContentPickToastAt > CONTENT_PICK_TOAST_DEDUP_MS && contentTitle) {
+            _lastContentPickToastAt = now
+            toast.success(`Now watching: ${contentTitle}`)
+          }
+        }
+
+        // ── Status change (waiting → playing → ended) ───────
+        // Re-fetch store in case setPartyContent above mutated it
+        const statusStore = useWatchPartyStore.getState()
+        if (!statusStore.currentParty) return
+        const dbStatus = newRow.status as 'waiting' | 'playing' | 'ended'
+        if (dbStatus && dbStatus !== statusStore.currentParty.status) {
+          console.log('[WatchParty] Postgres Change: status changed from', statusStore.currentParty.status, 'to', dbStatus)
+          statusStore.setPartyStatus(dbStatus)
+          if (dbStatus === 'playing') {
+            const dbPlaybackTime = (newRow.playback_time as number) || 0
+            useWatchPartyStore.getState().setPlaybackState({ isPlaying: true, currentTime: dbPlaybackTime })
+            useWatchPartyStore.getState().setPartyStartTime(dbPlaybackTime)
+          }
+          if (dbStatus === 'ended') {
+            toast.info('Watch party has ended')
+            useWatchPartyStore.getState().leaveParty()
+            unsubscribePartyChannel()
+          }
+        }
+
+        // ── is_playing / playback_time sync ──────────────────
+        const playStore = useWatchPartyStore.getState()
+        if (!playStore.currentParty) return
+        const dbIsPlaying = newRow.is_playing as boolean
+        const dbPlaybackTime = (newRow.playback_time as number) || 0
+        if (typeof dbIsPlaying === 'boolean' && dbIsPlaying !== playStore.currentParty.playbackState.isPlaying) {
+          console.log('[WatchParty] Postgres Change: isPlaying changed from', playStore.currentParty.playbackState.isPlaying, 'to', dbIsPlaying)
+          playStore.setPlaybackState({ isPlaying: dbIsPlaying, currentTime: dbPlaybackTime })
+        }
+      },
+    )
+
     // ── Broadcast events ────────────────────────────────────
     _partyChannel.on('broadcast', { event: 'wp' }, (payload: { payload: WpBroadcastEvent }) => {
       const event = payload.payload
@@ -1061,6 +1142,7 @@ function subscribePartyChannel(
             }
           }
           if (isContentChange) {
+            _lastContentPickToastAt = Date.now()
             toast.success(`Now watching: ${event.contentTitle}`)
           }
           break
@@ -1722,6 +1804,7 @@ function subscribePartyChannel(
 function unsubscribePartyChannel() {
   _pttHeld = false
   _pttStoppedUsers.clear()
+  _lastContentPickToastAt = 0
 
   // Clear all talking safety timeouts
   for (const [uid, timeout] of _talkingTimeouts) {

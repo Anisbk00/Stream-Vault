@@ -675,3 +675,22 @@ Stage Summary:
 - Content now appears for members within 3 seconds (DB poll), even without working WebSocket
 - Start now propagates to members within 3 seconds (status + is_playing sync)
 - No design changes, no other components touched
+---
+Task ID: 1
+Agent: Main
+Task: Fix Watch Party content pick not showing in realtime for members
+
+Work Log:
+- Investigated the full Watch Party content delivery architecture: Broadcast, content-heal interval (3s), immediate DB refresh, 30s periodic sync
+- Identified root cause: Supabase Realtime Broadcast is fire-and-forget — if the member's WebSocket isn't connected when the host picks content, the broadcast is lost. The content-heal interval (3s DB poll) is the safety net but too slow for "realtime" UX.
+- Added Postgres Changes listener on the `watch_parties` table in `subscribePartyChannel()`. This is triggered by actual DB writes (from the API), not client-side broadcasts, making it significantly more reliable.
+- When the host's `pickContent` API call updates the DB, the Postgres Change fires and the member receives it near-instantly — regardless of whether the Broadcast reached them.
+- Added content-pick toast dedup mechanism (`_lastContentPickToastAt` + `CONTENT_PICK_TOAST_DEDUP_MS`) to prevent duplicate toasts when both Broadcast and Postgres Change arrive.
+- The Postgres Change handler also syncs status changes (waiting → playing → ended) and is_playing state for maximum reliability.
+- Lint passes, no errors.
+
+Stage Summary:
+- Added Postgres Changes listener (`_partyChannel.on('postgres_changes', ...)`) as a reliable real-time delivery mechanism for content, status, and playback state changes
+- Added toast dedup variables: `_lastContentPickToastAt`, `CONTENT_PICK_TOAST_DEDUP_MS`
+- Reset dedup timestamp in `unsubscribePartyChannel()`
+- Key files modified: `src/hooks/use-watch-party.ts`
