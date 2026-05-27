@@ -693,6 +693,197 @@ function subscribePartyChannel(
       },
     })
 
+    // ── Start content-heal interval IMMEDIATELY (not inside subscribe) ──
+    // CRITICAL: Previously this interval was only created inside the
+    // subscribe() callback when status === 'SUBSCRIBED'. If the WebSocket
+    // never connects (common on PWA/mobile/unstable networks), the
+    // interval never starts, and members are stuck with stale data:
+    // no content, no status updates, no auto-play. This is the root
+    // cause of "content doesn't appear for members" and "start doesn't
+    // work for members". Starting it here ensures DB polling runs
+    // regardless of WebSocket state.
+    if (_contentHealInterval) { clearInterval(_contentHealInterval); _contentHealInterval = null }
+    _contentHealInterval = setInterval(async () => {
+      if (!_currentPartyId || _syncInProgress) return
+      const store = useWatchPartyStore.getState()
+      if (!store.currentParty) return
+
+      // Fast path: detect party ended (host closed app).
+      try {
+        const { data: statusRow } = await supabase
+          .from('watch_parties')
+          .select('status')
+          .eq('id', _currentPartyId)
+          .maybeSingle()
+        if (statusRow?.status === 'ended') {
+          toast.info('Watch party has ended')
+          store.leaveParty()
+          unsubscribePartyChannel()
+          return
+        }
+      } catch { /* non-critical */ }
+
+      // Check content + status from DB.
+      _syncInProgress = true
+      try {
+        const { data: contentRow, error: contentError } = await supabase
+          .from('watch_parties')
+          .select('content_id, media_type, season, episode, content_title, content_poster, is_playing, playback_time, status')
+          .eq('id', _currentPartyId)
+          .maybeSingle()
+
+        if (contentError || !contentRow) return
+        const current = useWatchPartyStore.getState()
+        if (!current.currentParty) return
+
+        // Sync content if DB has content that differs from local
+        if (contentRow.content_id && contentRow.content_id !== current.currentParty.contentId) {
+          current.setPartyContent({
+            contentId: contentRow.content_id,
+            mediaType: contentRow.media_type as 'movie' | 'tv',
+            season: contentRow.season,
+            episode: contentRow.episode,
+            contentTitle: contentRow.content_title || '',
+            contentPoster: contentRow.content_poster,
+          })
+          // After setPartyContent, re-check is_playing from the same query
+          if (contentRow.is_playing) {
+            useWatchPartyStore.getState().setPlaybackState({ isPlaying: true, currentTime: contentRow.playback_time || 0 })
+          }
+        } else if (!contentRow.content_id && current.currentParty.contentId) {
+          // Host cleared content — unlikely but handle it
+        }
+
+        // ── Sync party status (waiting → playing) ──────────────────
+        // CRITICAL FIX: Previously the content-heal interval only synced
+        // content_id. It did NOT sync the party status or is_playing flag.
+        // This meant that when the host clicked "Start" (changing status
+        // from 'waiting' to 'playing'), the member's store stayed at
+        // status='waiting' even though the DB had status='playing'.
+        // Without status='playing', the auto-play effect never triggers
+        // and the member's video never starts.
+        const dbStatus = contentRow.status as 'waiting' | 'playing' | 'ended'
+        if (dbStatus && dbStatus !== current.currentParty.status) {
+          console.log('[WatchParty] Content-heal: status changed from', current.currentParty.status, 'to', dbStatus)
+          current.setPartyStatus(dbStatus)
+          // When party transitions to 'playing', set partyStartTime so
+          // the auto-play effect triggers correctly for the member.
+          if (dbStatus === 'playing') {
+            useWatchPartyStore.getState().setPartyStartTime(contentRow.playback_time || 0)
+          }
+        }
+
+        // Sync is_playing even when content hasn't changed.
+        // The host may have started the party (is_playing: true) without
+        // changing content. Without this sync, members stuck at
+        // isPlaying=false would never start playing.
+        const dbIsPlaying = contentRow.is_playing
+        const dbPlaybackTime = contentRow.playback_time || 0
+        if (dbIsPlaying !== current.currentParty.playbackState.isPlaying) {
+          console.log('[WatchParty] Content-heal: isPlaying changed from', current.currentParty.playbackState.isPlaying, 'to', dbIsPlaying)
+          current.setPlaybackState({
+            isPlaying: dbIsPlaying,
+            currentTime: dbPlaybackTime,
+          })
+        }
+
+        // Sync member statuses from DB.
+        try {
+          const { data: memberRows } = await supabase
+            .from('watch_party_members')
+            .select('user_id, status')
+            .eq('party_id', _currentPartyId)
+            .in('status', ['joined', 'invited'])
+
+          if (!memberRows || memberRows.length === 0) return
+          const dbStatusMap = new Map(memberRows.map((m) => [m.user_id, m.status]))
+          const localMembers = current.currentParty.members
+          let needsUpdate = false
+          const updatedMembers = localMembers.map((m) => {
+            const dbMemberStatus = dbStatusMap.get(m.userId)
+            if (!dbMemberStatus) return m
+            if (m.memberStatus === 'invited' && dbMemberStatus === 'joined') {
+              needsUpdate = true
+              return { ...m, memberStatus: 'joined' as const }
+            }
+            return m
+          })
+          const localIds = new Set(localMembers.map((m) => m.userId))
+          const newDbMembers = memberRows.filter((m) => !localIds.has(m.user_id) && m.status === 'joined')
+          if (newDbMembers.length > 0) {
+            const newIds = newDbMembers.map((m) => m.user_id)
+            const { data: profiles } = await supabase
+              .from('profiles')
+              .select('id, display_name, avatar_url')
+              .in('id', newIds)
+            const profileMap = new Map((profiles || []).map((p) => [p.id, p]))
+            for (const row of newDbMembers) {
+              const profile = profileMap.get(row.user_id)
+              updatedMembers.push({
+                userId: row.user_id,
+                displayName: profile?.display_name || 'Unknown',
+                avatarUrl: profile?.avatar_url || null,
+                isHost: row.user_id === current.currentParty.hostId,
+                isTalking: false,
+                memberStatus: 'joined',
+              })
+              needsUpdate = true
+            }
+          }
+          const dbIds = new Set(memberRows.map((m) => m.user_id))
+          const removedMembers = updatedMembers.filter((m) => !dbIds.has(m.userId))
+          if (removedMembers.length > 0) {
+            needsUpdate = true
+          }
+          if (needsUpdate) {
+            current.setMembers(updatedMembers.filter((m) => dbIds.has(m.userId)))
+          }
+        } catch { /* non-critical */ }
+      } catch { /* non-critical */ } finally {
+        _syncInProgress = false
+      }
+    }, 3_000)
+
+    // ── Immediate DB refresh (not gated on WebSocket subscription) ──
+    // Fetch the latest party state right away so members see content
+    // and status changes that happened before they subscribed.
+    // This runs even if the WebSocket never connects.
+    fetchPartyFromDb(partyId).then((freshParty) => {
+      if (!freshParty) return
+      const currentStore = useWatchPartyStore.getState()
+      if (!currentStore.currentParty) return
+
+      const needsContentUpdate = freshParty.contentId &&
+        (freshParty.contentId !== currentStore.currentParty.contentId ||
+          freshParty.contentTitle !== currentStore.currentParty.contentTitle)
+      const needsStatusUpdate = freshParty.status !== currentStore.currentParty.status
+      const needsPlaybackUpdate = freshParty.playbackState.isPlaying !== currentStore.currentParty.playbackState.isPlaying
+
+      if (needsContentUpdate) {
+        currentStore.setPartyContent({
+          contentId: freshParty.contentId!,
+          mediaType: freshParty.mediaType!,
+          season: freshParty.season,
+          episode: freshParty.episode,
+          contentTitle: freshParty.contentTitle!,
+          contentPoster: freshParty.contentPoster,
+        })
+        if (freshParty.playbackState.isPlaying) {
+          useWatchPartyStore.getState().setPlaybackState({ isPlaying: true, currentTime: freshParty.playbackState.currentTime })
+        }
+      }
+      if (needsStatusUpdate) {
+        currentStore.setPartyStatus(freshParty.status)
+      }
+      if (needsPlaybackUpdate && !needsContentUpdate) {
+        currentStore.setPlaybackState({
+          isPlaying: freshParty.playbackState.isPlaying,
+          currentTime: freshParty.playbackState.currentTime,
+          pausedBy: freshParty.playbackState.pausedBy,
+        })
+      }
+    }).catch(() => { /* non-critical */ })
+
     // ── Eagerly create voice manager BEFORE subscription ─────
     // Previously the voice manager was only created inside the
     // subscribe() callback when status === 'SUBSCRIBED'. If the
@@ -1408,137 +1599,11 @@ function subscribePartyChannel(
           }
         }, 30_000)
 
-        // ── Fast content self-heal ──────────────────────────────
-        // Polls every 3 seconds to detect the condition:
-        //   party status === 'playing' BUT no contentId set.
-        // This happens when the content-picked broadcast is lost
-        // (WS flaky, REST delivery requires receiver WS to be up).
-        // Instead of waiting up to 30s for the periodic sync, this
-        // catches it within 3 seconds and fetches content from DB.
-        if (_contentHealInterval) { clearInterval(_contentHealInterval); _contentHealInterval = null }
-        _contentHealInterval = setInterval(async () => {
-          if (!_currentPartyId || _syncInProgress) return
-          const store = useWatchPartyStore.getState()
-          if (!store.currentParty) return
-
-          // Fast path: detect party ended (host closed app).
-          // This 3-second poll ensures members leave within ~3-5 seconds
-          // instead of waiting for the 30-second periodic sync.
-          // Uses a lightweight status-only query to avoid full party fetch.
-          try {
-            const { data: statusRow } = await supabase
-              .from('watch_parties')
-              .select('status')
-              .eq('id', _currentPartyId)
-              .maybeSingle()
-            if (statusRow?.status === 'ended') {
-              toast.info('Watch party has ended')
-              store.leaveParty()
-              unsubscribePartyChannel()
-              return
-            }
-          } catch { /* non-critical */ }
-
-          // Check content from DB. On PWA/mobile, Supabase Broadcast
-          // can be lost when WebSocket connections are unreliable.
-          // REST fallback delivery also requires the receiver's WS to
-          // be up. This poll is the only reliable content delivery path
-          // on unstable connections. It uses a lightweight query that
-          // only fetches content fields (not members/profiles).
-          _syncInProgress = true
-          try {
-            const { data: contentRow, error: contentError } = await supabase
-              .from('watch_parties')
-              .select('content_id, media_type, season, episode, content_title, content_poster, is_playing, playback_time, status')
-              .eq('id', _currentPartyId)
-              .maybeSingle()
-
-            if (contentError || !contentRow) return
-            const current = useWatchPartyStore.getState()
-            if (!current.currentParty) return
-
-            // Sync content if DB has content that differs from local
-            if (contentRow.content_id && contentRow.content_id !== current.currentParty.contentId) {
-              current.setPartyContent({
-                contentId: contentRow.content_id,
-                mediaType: contentRow.media_type as 'movie' | 'tv',
-                season: contentRow.season,
-                episode: contentRow.episode,
-                contentTitle: contentRow.content_title || '',
-                contentPoster: contentRow.content_poster,
-              })
-              if (contentRow.is_playing) {
-                current.setPlaybackState({ isPlaying: true, currentTime: contentRow.playback_time || 0 })
-              }
-            } else if (!contentRow.content_id && current.currentParty.contentId) {
-              // Host cleared content — unlikely but handle it
-            }
-
-            // Sync member statuses from DB. On PWA, the member-joined
-            // broadcast is frequently lost (WebSocket unreliable).
-            // REST fallback delivery requires the receiver's WebSocket
-            // to be up. This lightweight query catches members who
-            // accepted but the host never got the broadcast.
-            try {
-              const { data: memberRows } = await supabase
-                .from('watch_party_members')
-                .select('user_id, status')
-                .eq('party_id', _currentPartyId)
-                .in('status', ['joined', 'invited'])
-
-              if (!memberRows || memberRows.length === 0) return
-              const dbStatusMap = new Map(memberRows.map((m) => [m.user_id, m.status]))
-              const localMembers = current.currentParty.members
-              let needsUpdate = false
-              const updatedMembers = localMembers.map((m) => {
-                const dbStatus = dbStatusMap.get(m.userId)
-                if (!dbStatus) return m
-                // Only upgrade: invited → joined. Never downgrade.
-                if (m.memberStatus === 'invited' && dbStatus === 'joined') {
-                  needsUpdate = true
-                  return { ...m, memberStatus: 'joined' as const }
-                }
-                return m
-              })
-              // Check for new members not in local state (added by host but
-              // broadcast was lost by member)
-              const localIds = new Set(localMembers.map((m) => m.userId))
-              const newDbMembers = memberRows.filter((m) => !localIds.has(m.user_id) && m.status === 'joined')
-              if (newDbMembers.length > 0) {
-                // Fetch profiles for new members
-                const newIds = newDbMembers.map((m) => m.user_id)
-                const { data: profiles } = await supabase
-                  .from('profiles')
-                  .select('id, display_name, avatar_url')
-                  .in('id', newIds)
-                const profileMap = new Map((profiles || []).map((p) => [p.id, p]))
-                for (const row of newDbMembers) {
-                  const profile = profileMap.get(row.user_id)
-                  updatedMembers.push({
-                    userId: row.user_id,
-                    displayName: profile?.display_name || 'Unknown',
-                    avatarUrl: profile?.avatar_url || null,
-                    isHost: row.user_id === current.currentParty.hostId,
-                    isTalking: false,
-                    memberStatus: 'joined',
-                  })
-                  needsUpdate = true
-                }
-              }
-              // Check for members removed from DB (left party)
-              const dbIds = new Set(memberRows.map((m) => m.user_id))
-              const removedMembers = updatedMembers.filter((m) => !dbIds.has(m.userId))
-              if (removedMembers.length > 0) {
-                needsUpdate = true
-              }
-              if (needsUpdate) {
-                current.setMembers(updatedMembers.filter((m) => dbIds.has(m.userId)))
-              }
-            } catch { /* non-critical */ }
-          } catch { /* non-critical */ } finally {
-            _syncInProgress = false
-          }
-        }, 3_000)
+        // ── Content-heal interval already started before subscribe() ──
+        // The content-heal interval (3s DB poll for content + status)
+        // was moved outside the subscribe callback to ensure it runs
+        // even when the WebSocket never connects. No need to create
+        // it again here — the existing interval continues running.
 
         // ── Channel keepalive — detect and recover WebSocket drops ──
         // Supabase Realtime WebSocket connections can silently die

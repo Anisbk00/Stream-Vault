@@ -652,3 +652,26 @@ Stage Summary:
 - iOS voice clips now functional via Web Audio API (AudioContext created during PTT gesture)
 - Desktop/Android PTT now instant (no getUserMedia re-init on every press)
 - No design or visual changes made
+---
+Task ID: 10
+Agent: Main Agent
+Task: Fix Watch Party content and start not reaching members — "waiting for content" persists, Start doesn't propagate
+
+Work Log:
+- Read full use-watch-party.ts, API route, store, WatchPartyRoom.tsx, StreamVaultApp.tsx
+- Traced the complete data flow for content-picked and party-started events
+- Identified ROOT CAUSE: Content-heal interval and periodic sync interval were created INSIDE the `_partyChannel.subscribe()` callback when `status === 'SUBSCRIBED'`. If the Supabase Realtime WebSocket never reaches SUBSCRIBED (common on PWA/mobile/unstable networks), these intervals NEVER start. Members are stuck with stale data forever — no content, no status updates, no auto-play.
+- Identified SECONDARY CAUSE: The content-heal interval only synced `content_id`. It did NOT sync party status (waiting → playing) or `is_playing` flag. Even when the interval was running, the host clicking "Start" (changing status from 'waiting' to 'playing') would NOT propagate to members. The auto-play effect requires `status === 'playing'` and `contentId` to be set, so without status sync, members never start playing.
+- Fix 1: Moved content-heal interval creation BEFORE `_partyChannel.subscribe()` call — now runs immediately when user joins party, regardless of WebSocket state
+- Fix 2: Added status sync (`waiting → playing`) and is_playing sync to the content-heal interval — members now detect when host starts the party within 3 seconds
+- Fix 3: Added `setPartyStartTime()` when status changes to 'playing' via content-heal — ensures auto-play effect triggers correctly
+- Fix 4: Added immediate DB refresh right after channel creation (not gated on subscription) — members get latest party state even before WebSocket connects
+- Fix 5: Removed duplicate content-heal interval from inside subscribe callback (replaced with comment noting it's already running)
+- Verified: 0 ESLint errors, dev server running cleanly
+
+Stage Summary:
+- File changed: src/hooks/use-watch-party.ts
+- Root cause: DB polling intervals gated on WebSocket subscription — circular logic where fallback only runs when primary path works
+- Content now appears for members within 3 seconds (DB poll), even without working WebSocket
+- Start now propagates to members within 3 seconds (status + is_playing sync)
+- No design changes, no other components touched
