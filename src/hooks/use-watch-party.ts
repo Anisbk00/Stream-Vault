@@ -312,6 +312,7 @@ interface WpMemberLeftEvent {
   t: 'member-left'
   userId: string
   displayName: string
+  leftBy: string // who initiated the leave (the member themselves, or the host removing them)
 }
 
 interface WpContentPickedEvent {
@@ -1358,6 +1359,7 @@ function subscribePartyChannel(
                 t: 'member-left',
                 userId: absentUserId,
                 displayName: absentMember.displayName,
+                leftBy: useAuthStore.getState().user?.id ?? absentUserId, // host is removing the member
               } as WpMemberLeftEvent, 'member-absence-removal')
             }
             // Update DB: set member status to 'left'
@@ -1858,7 +1860,7 @@ export function useWatchParty() {
       if (_partyChannel) {
         const broadcastPayload: WpBroadcastEvent = store.isHost
           ? { t: 'ended', endedBy: user?.id } as WpEndedEvent
-          : { t: 'member-left', userId: user!.id, displayName: profile!.display_name } as WpMemberLeftEvent
+          : { t: 'member-left', userId: user!.id, displayName: profile!.display_name, leftBy: user!.id } as WpMemberLeftEvent
 
         // Try WebSocket first (fast, synchronous queue)
         try {
@@ -1909,19 +1911,35 @@ export function useWatchParty() {
       sendLeaveSignal('ended-beforeunload')
     }
 
-    function handlePageHide(event: PageTransitionEvent) {
-      // persisted=false means the page is being discarded (not going to bfcache)
-      // In PWA, swiping away always results in persisted=false
-      if (event.persisted === false) {
-        sendLeaveSignal('ended-pagehide')
+    function handlePageHide() {
+      // Always send leave signal on pagehide, regardless of persisted state.
+      // Previously we only sent when persisted===false, but on iOS PWA going
+      // to home screen fires pagehide with persisted===true (bfcache), and the
+      // leave signal was never sent — party stayed open indefinitely.
+      sendLeaveSignal('ended-pagehide')
+    }
+
+    function handleVisibilityChange() {
+      // In PWA standalone mode, the only way to "leave" the app is pressing
+      // home or switching to another app — visibilityState becomes 'hidden'.
+      // This is the most reliable signal on iOS/Android PWA where beforeunload
+      // doesn't fire and pagehide may be delayed or lost.
+      if (document.visibilityState !== 'hidden') return
+      const isStandalone =
+        window.matchMedia('(display-mode: standalone)').matches ||
+        (navigator as unknown as { standalone?: boolean }).standalone === true
+      if (isStandalone) {
+        sendLeaveSignal('ended-visibilitychange-pwa')
       }
     }
 
     window.addEventListener('beforeunload', handleBeforeUnload)
     window.addEventListener('pagehide', handlePageHide)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => {
       window.removeEventListener('beforeunload', handleBeforeUnload)
       window.removeEventListener('pagehide', handlePageHide)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [user, profile])
 
@@ -2715,6 +2733,7 @@ export function useWatchParty() {
             t: 'member-left',
             userId: user.id,
             displayName: profile.display_name,
+            leftBy: user.id,
           } as WpMemberLeftEvent, 'member-left')
       }
 
