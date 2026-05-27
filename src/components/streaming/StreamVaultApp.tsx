@@ -925,18 +925,23 @@ export default function StreamVaultApp({ supabaseUrl, supabaseAnonKey }: StreamV
           return;
         }
       } else if (task.isHlsDownload && blob.type === 'video/mp4') {
-        // ── Remuxed fMP4 download → play via MSE (MediaSource Extensions) ──
-        // Chrome's blob URL handler stalls on large fMP4 files (~50s mark).
-        // MSE gives the browser explicit control over buffering and seeking,
-        // which is exactly how Netflix, YouTube, and all professional web
-        // video players handle fMP4 playback.
+        // ── Remuxed fMP4 download → play via direct blob URL ──
+        // The TS→MP4 remux during download produced a proper, self-contained
+        // MP4 file. Direct blob URL playback is the most reliable path —
+        // the browser's native MP4 demuxer handles everything correctly.
+        //
+        // Why NOT MSE (MediaSource Extensions)?
+        // MSE progressive playback was attempted here before, but it causes
+        // QuotaExceededError infinite loops on large files (SourceBuffer quota
+        // fills up, evictBefore() can't free enough when currentTime is low,
+        // appendNext() retries infinitely). MSE is designed for live/streaming
+        // content, not for playing a complete downloaded file.
         console.log(
-          `[SV Playback] ✓ Using MSE playback path — blob type='${blob.type}', ` +
-          `size=${(blob.size / 1024 / 1024).toFixed(2)} MB. ` +
-          `MSE = professional-grade playback = no stalling.`,
+          `[SV Playback] ✓ Using blob URL playback path — blob type='${blob.type}', ` +
+          `size=${(blob.size / 1024 / 1024).toFixed(2)} MB.`,
         );
-        fmp4BlobForMse = blob;
-        videoSrc = ''; // MSE sets video.src internally
+        videoSrc = URL.createObjectURL(blob);
+        blobUrlsToTrack.push(videoSrc);
       } else {
         // ── Direct MP4 download → play via blob URL ──
         console.log(
