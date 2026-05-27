@@ -39,6 +39,16 @@ export default function LoginScreen() {
     }
 
     setIsLoading(true);
+
+    // Safety timeout: if any step hangs (GoTrue race, network stall in
+    // PWA), stop the spinner after 15 seconds and show an error.
+    // In PWA standalone mode, a hung request leaves the user stuck on a
+    // spinning button with no way to recover except force-closing the app.
+    const timeoutId = setTimeout(() => {
+      setIsLoading(false);
+      setEmailError('Sign in timed out. Check your connection and try again.');
+    }, 15_000);
+
     try {
       // Use a FRESH client for signIn, not the singleton.
       // The singleton's GoTrue client can hang indefinitely after page reload
@@ -76,8 +86,30 @@ export default function LoginScreen() {
       // and survives data clears. If set, profile was completed before.
       const metaCompleted = !!data.user.user_metadata?.profile_completed;
 
-      // Fetch profile from DB using authed client (handles RLS correctly)
-      const profile = await getMyProfile();
+      // Fetch profile from DB using the FRESH signIn client, not the
+      // singleton. After logout(), resetSupabaseClient() nulls the
+      // singleton, and the next getMyProfile() triggers singleton
+      // recreation. The new singleton's GoTrue client can hang
+      // indefinitely on getSession() in PWA mode (re-initialization race).
+      // The fresh signIn client already has a valid session in memory,
+      // so its getSession() returns instantly — no hang possible.
+      let profile: Awaited<ReturnType<typeof getMyProfile>> = null;
+      try {
+        const { data: { session: freshSession } } = await signInClient.auth.getSession();
+        if (freshSession?.access_token && freshSession.user?.id) {
+          const { data: profileData } = await signInClient
+            .from('profiles')
+            .select('*')
+            .eq('id', freshSession.user.id)
+            .maybeSingle();
+          if (profileData) {
+            profile = { ...profileData, is_complete: profileData.display_name.trim().length > 0 };
+          }
+        }
+      } catch {
+        // Profile fetch failed — non-critical. If metaCompleted is true
+        // the user still gets in. If not, they'll see needs_profile.
+      }
       setProfile(profile);
 
       // Register this device session — MUST await to check for rejection.
@@ -105,8 +137,9 @@ export default function LoginScreen() {
         setStatus('needs_profile');
       }
     } catch (err) {
-      // silent
+      setEmailError('Sign in failed. Please try again.');
     } finally {
+      clearTimeout(timeoutId);
       setIsLoading(false);
     }
   }, [email, password, setAuth, setProfile, setStatus]);
@@ -120,7 +153,27 @@ export default function LoginScreen() {
         setSessionRejection(null);
         const { user, session } = lastAuthRef.current;
         const metaCompleted = !!user.user_metadata?.profile_completed;
-        const profile = await getMyProfile();
+        // Fetch profile using a fresh client (same reason as handleLogin —
+        // singleton may hang after resetSupabaseClient in PWA mode).
+        let profile: Awaited<ReturnType<typeof getMyProfile>> = null;
+        try {
+          const freshClient = createClient(
+            process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+            process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '',
+            { auth: { storageKey: 'streamvault-auth-token', storage: typeof window !== 'undefined' ? window.localStorage : undefined } },
+          );
+          const { data: { session: freshSession } } = await freshClient.auth.getSession();
+          if (freshSession?.access_token && freshSession.user?.id) {
+            const { data: profileData } = await freshClient
+              .from('profiles')
+              .select('*')
+              .eq('id', freshSession.user.id)
+              .maybeSingle();
+            if (profileData) {
+              profile = { ...profileData, is_complete: profileData.display_name.trim().length > 0 };
+            }
+          }
+        } catch { /* non-critical */ }
         setProfile(profile);
         if (metaCompleted || (profile && profile.display_name.trim().length > 0)) {
           setStatus('authenticated');

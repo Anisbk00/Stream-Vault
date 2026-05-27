@@ -694,3 +694,24 @@ Stage Summary:
 - Added toast dedup variables: `_lastContentPickToastAt`, `CONTENT_PICK_TOAST_DEDUP_MS`
 - Reset dedup timestamp in `unsubscribePartyChannel()`
 - Key files modified: `src/hooks/use-watch-party.ts`
+---
+Task ID: 2
+Agent: Main
+Task: Fix PWA login-after-logout spinning button — getMyProfile() hangs on singleton
+
+Work Log:
+- Investigated the full auth flow: LoginScreen → handleLogin → signInWithPassword → getMyProfile → registerSession
+- Identified root cause #1: After logout(), resetSupabaseClient() nulls the singleton. When handleLogin() calls getMyProfile() at line 80, this triggers creation of a NEW singleton. The new GoTrue client's getSession() can hang indefinitely in PWA mode (GoTrue re-initialization race). If getMyProfile() hangs, handleLogin() never reaches setStatus('authenticated') or finally { setIsLoading(false) }, so the spinner runs forever.
+- Identified root cause #2: Silent catch block at line 107-108 swallowed all errors — user sees no feedback.
+- Fix #1: Replaced getMyProfile() call with direct profile fetch using the FRESH signIn client (which already has a valid in-memory session). The fresh client's getSession() returns instantly — no GoTrue re-initialization race possible.
+- Fix #2: Added 15-second safety timeout to handleLogin() — if any step hangs, the spinner stops and the user sees an error message.
+- Fix #3: Changed silent catch block to show error feedback: "Sign in failed. Please try again."
+- Applied same fix to handleForceLogin() which had the same getMyProfile() singleton issue.
+- Lint passes, dev server compiles successfully.
+
+Stage Summary:
+- Root cause: getMyProfile() uses the singleton Supabase client which can hang after resetSupabaseClient() in PWA mode
+- Fix: Use the fresh signIn client (already created for signInWithPassword) to fetch the profile directly
+- Added 15s timeout as safety net for PWA hangs
+- Added error feedback in catch block
+- Key files modified: src/components/streaming/LoginScreen.tsx
