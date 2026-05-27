@@ -164,6 +164,41 @@ export async function remuxTsToMp4(
     );
   }
 
+  // ── Output sanity check ──────────────────────────────────────────────
+  // The remuxed fMP4 should be a reasonable fraction of the input TS size.
+  // If it's < 10% of input, something is very wrong (likely corrupted TS data
+  // that mux.js partially processed but couldn't produce valid video from).
+  const outputBytes = dataParts.reduce((sum, p) => sum + p.byteLength, 0) + (initSegment?.byteLength ?? 0);
+  const outputRatio = outputBytes / totalInputBytes;
+  if (outputRatio < 0.1 && totalInputBytes > 500_000) {
+    console.error(
+      `[SV Remux] FAILED — output is suspiciously small: ` +
+      `${(outputBytes / 1024 / 1024).toFixed(2)} MB output vs ${(totalInputBytes / 1024 / 1024).toFixed(2)} MB input ` +
+      `(${(outputRatio * 100).toFixed(1)}%). The TS data is likely corrupted.`,
+    );
+    throw new Error(
+      `Remux failed — output is only ${(outputRatio * 100).toFixed(1)}% of input size. ` +
+      `The TS data is likely corrupted or uses unsupported codecs. ` +
+      `Input: ${(totalInputBytes / 1024 / 1024).toFixed(2)} MB → Output: ${(outputBytes / 1024 / 1024).toFixed(2)} MB.`,
+    );
+  }
+
+  // Validate the init segment starts with ftyp box (valid fMP4 structure)
+  if (initSegment.byteLength >= 8) {
+    const view = new DataView(initSegment.buffer as ArrayBuffer, initSegment.byteOffset, 8);
+    const boxType = view.getUint32(4);
+    // ftyp = 0x66747970
+    if (boxType !== 0x66747970) {
+      console.error(
+        `[SV Remux] FAILED — init segment doesn't start with ftyp box. ` +
+        `Got: 0x${boxType.toString(16)}. Invalid fMP4 structure.`,
+      );
+      throw new Error(
+        'Remux failed — invalid fMP4 structure (no ftyp box). The TS data may be corrupted.',
+      );
+    }
+  }
+
   // Cache segments for direct MSE playback (skip fMP4 re-parsing)
   if (taskId) {
     cacheSegments(taskId, {

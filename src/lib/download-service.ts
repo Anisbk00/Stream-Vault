@@ -351,12 +351,10 @@ async function _executeDownload(task: DownloadTask): Promise<void> {
 
     const blob = result.blob;
 
-    // ── Step 3: No transmux needed ────────────────────────────────
-    // HLS downloads are now remuxed to MP4 during download (in hls-downloader).
-    // The blob type tells us the format:
-    //   - 'video/mp4'  → remuxed fMP4 → play directly via blob URL (native)
-    //   - 'video/mp2t' → raw TS (remux failed) → play via MemoryHlsLoader + HLS.js
-    // Direct downloads (MP4/MKV) are also played via blob URL.
+    // ── Step 3: Post-download integrity validation ────────────────
+    // The download completed without errors, but the blob might still be
+    // corrupted (e.g., CDN returned error pages for most but not all segments,
+    // or the remux produced a tiny/garbage file). Validate before saving.
     const isHlsDownload = downloadUrl.includes('.m3u8');
     const isRemuxedToMp4 = blob.type === 'video/mp4' && isHlsDownload;
     const finalBlob = blob;
@@ -367,6 +365,19 @@ async function _executeDownload(task: DownloadTask): Promise<void> {
       `isHlsDownload=${isHlsDownload}, isRemuxedToMp4=${isRemuxedToMp4}, ` +
       `segmentMeta=${result.segmentMeta ? result.segmentMeta.length + ' entries' : 'none'}`,
     );
+
+    // ── Final blob size sanity check ──────────────────────────────────
+    // A valid movie/episode should be at least 1MB. If it's smaller,
+    // the CDN almost certainly returned error pages or the stream was cut short.
+    const MIN_VIDEO_BYTES = 1_000_000; // 1 MB
+    if (finalBlob.size < MIN_VIDEO_BYTES) {
+      throw new Error(
+        `Downloaded file is only ${(finalBlob.size / 1024).toFixed(0)} KB — ` +
+        `too small to be valid video (minimum expected: 1 MB). ` +
+        `The video source may be unavailable or the CDN is blocking access. ` +
+        `Try a different content source.`
+      );
+    }
 
     if (isHlsDownload && !isRemuxedToMp4) {
       console.warn(
@@ -496,18 +507,26 @@ async function _executeDownload(task: DownloadTask): Promise<void> {
     });
   } catch (err) {
     removeController(task.id);
+    // Free any partial blob cache from failed download
+    evictBlob(task.id);
 
     if (err instanceof DOMException && err.name === 'AbortError') {
       // User cancelled — remove the task + clean IndexedDB
       useDownloadStore.getState().removeTask(task.id);
       deleteBlobFromStorage(task.id).catch(() => {});
     } else {
+      const errorMessage = err instanceof Error ? err.message : 'Download failed';
+      console.error(
+        `[SV DownloadService] Download FAILED for '${task.title}': ${errorMessage}`
+      );
       useDownloadStore.getState().updateTask(task.id, {
         status: 'error',
-        error: err instanceof Error ? err.message : 'Download failed',
+        error: errorMessage,
       });
+      // Clean up any partial IndexedDB data
+      deleteBlobFromStorage(task.id).catch(() => {});
       toast.error('Download failed', {
-        description: `${task.title} — ${err instanceof Error ? err.message : 'Unknown error'}`,
+        description: `${task.title} — ${errorMessage}`,
       });
     }
   }

@@ -282,17 +282,96 @@ function selectVariant(
   return sorted[Math.floor(sorted.length / 2)].url;
 }
 
+// ── Segment data validation ──────────────────────────────────────────────────
+// CDNs sometimes return HTTP 200 with HTML error pages instead of TS data.
+// This is the #1 cause of "downloaded video is broken" — the blob contains
+// HTML, not video. We validate every segment to catch this early.
+
+/** Minimum valid TS segment size in bytes. Real TS segments are typically
+ *  100KB–2MB each. Anything under 1KB is almost certainly an error page. */
+const MIN_SEGMENT_BYTES = 1024;
+
+/** TS sync byte (0x47) — every valid MPEG-TS packet starts with this */
+const TS_SYNC_BYTE = 0x47;
+
+/** ftyp box type for MP4 — remuxed segments may start with this */
+const MP4_FTYP = 0x66747970; // 'ftyp' in ASCII
+
+/** Check if an ArrayBuffer looks like valid video segment data (TS or fMP4).
+ *  Rejects HTML error pages, empty responses, and other garbage. */
+function validateSegmentData(data: ArrayBuffer, segmentIndex: number, url: string): void {
+  if (data.byteLength === 0) {
+    throw new Error(`Segment ${segmentIndex}: empty response (0 bytes) — CDN returned no data`);
+  }
+
+  if (data.byteLength < MIN_SEGMENT_BYTES) {
+    // Suspiciously small — likely an error page or redirect
+    const preview = new Uint8Array(data, 0, Math.min(data.byteLength, 200));
+    const text = new TextDecoder().decode(preview);
+
+    // Check for HTML error pages
+    if (text.trimStart().startsWith('<') || text.includes('<html') || text.includes('<!DOCTYPE')) {
+      throw new Error(
+        `Segment ${segmentIndex}: CDN returned HTML error page instead of video data ` +
+        `(${data.byteLength} bytes). The video source may be unavailable or blocked.`
+      );
+    }
+
+    throw new Error(
+      `Segment ${segmentIndex}: response too small (${data.byteLength} bytes, minimum ${MIN_SEGMENT_BYTES}). ` +
+      `The CDN may be rate-limiting or the content is unavailable.`
+    );
+  }
+
+  // Check first byte for TS sync byte or MP4 ftyp
+  const firstByte = new Uint8Array(data, 0, 1)[0];
+  if (firstByte === TS_SYNC_BYTE) return; // Valid TS
+
+  // Check for ftyp box (fMP4 init or media segment)
+  if (data.byteLength >= 8) {
+    const view = new DataView(data, 0, 8);
+    const boxType = view.getUint32(4);
+    if (boxType === MP4_FTYP) return; // Valid MP4
+  }
+
+  // Not TS or MP4 — could be HTML error page with enough padding
+  const preview = new Uint8Array(data, 0, Math.min(data.byteLength, 500));
+  const text = new TextDecoder().decode(preview);
+  if (text.includes('<html') || text.includes('<!DOCTYPE') || text.includes('<head')) {
+    throw new Error(
+      `Segment ${segmentIndex}: CDN returned HTML page instead of video data. ` +
+      `The video source may be unavailable or blocked.`
+    );
+  }
+
+  // Data doesn't start with TS sync or ftyp but isn't obviously HTML.
+  // Some CDNs use alternative container formats — log a warning but accept.
+  console.warn(
+    `[SV Download] Segment ${segmentIndex}: data doesn't start with TS sync (0x${firstByte.toString(16)}) or ftyp. ` +
+    `Size: ${data.byteLength} bytes. Proceeding — may cause remux issues.`
+  );
+}
+
 // Download a single segment through proxy with retry + global semaphore
 async function fetchSegment(
   url: string,
   signal?: AbortSignal,
   referer?: string,
+  segmentIndex?: number,
 ): Promise<ArrayBuffer> {
   const response = await fetchWithRetry(proxyUrl(url, referer), signal);
   if (!response.ok) {
     throw new Error(`Failed to fetch segment: ${response.status}`);
   }
-  return response.arrayBuffer();
+
+  const data = await response.arrayBuffer();
+
+  // Validate segment data is actual video, not an HTML error page
+  if (segmentIndex !== undefined) {
+    validateSegmentData(data, segmentIndex, url);
+  }
+
+  return data;
 }
 
 export interface SegmentMeta {
@@ -380,6 +459,37 @@ export async function startDownload(
     }
 
     blob = new Blob(chunks.map(c => c.buffer as ArrayBuffer), { type: 'video/mp4' });
+
+    // ── Direct download integrity check ──────────────────────────────
+    if (blob.size < 100_000) {
+      throw new Error(
+        `Downloaded file is only ${(blob.size / 1024).toFixed(1)} KB — ` +
+        `too small to be valid video. The download may have been interrupted or the source is unavailable.`
+      );
+    }
+    // Validate the blob starts with ftyp (MP4) or TS sync byte
+    const headerSlice = blob.slice(0, 12);
+    const headerBuf = await headerSlice.arrayBuffer();
+    if (headerBuf.byteLength >= 8) {
+      const headerView = new DataView(headerBuf);
+      const boxType = headerView.getUint32(4);
+      const firstByte = new Uint8Array(headerBuf)[0];
+      if (boxType !== MP4_FTYP && firstByte !== TS_SYNC_BYTE) {
+        // Check if it's an HTML error page
+        const preview = new Uint8Array(headerBuf, 0, Math.min(headerBuf.byteLength, 200));
+        const text = new TextDecoder().decode(preview);
+        if (text.trimStart().startsWith('<') || text.includes('<html')) {
+          throw new Error(
+            `Downloaded file is an HTML page, not video. The CDN may be blocking access. ` +
+            `Try a different content source.`
+          );
+        }
+        console.warn(
+          `[SV Download] Direct download: blob doesn't start with MP4 ftyp or TS sync byte (0x${firstByte.toString(16)}). ` +
+          `File may be corrupted or in an unsupported format.`
+        );
+      }
+    }
     // Direct download complete
   } else {
     // HLS download
@@ -388,6 +498,21 @@ export async function startDownload(
     // Step 1: Fetch m3u8 manifest
     const manifestResponse = await fetchWithRetry(proxyUrl(task.url, referer), abortSignal);
     const manifestContent = await manifestResponse.text();
+
+    // Validate manifest is actually m3u8, not an HTML error page
+    if (manifestContent.trimStart().startsWith('<') || manifestContent.includes('<!DOCTYPE') || manifestContent.includes('<html')) {
+      throw new Error(
+        `Video source returned an error page instead of a video manifest. ` +
+        `The content may be unavailable or the CDN is blocking access. Try a different source.`
+      );
+    }
+    if (!manifestContent.includes('#EXT')) {
+      throw new Error(
+        `Video source did not return a valid HLS manifest. ` +
+        `The URL may be incorrect or the content is no longer available.`
+      );
+    }
+
     const parsed = parseM3u8(manifestContent);
 
     let segmentUrls: string[] = [];
@@ -401,6 +526,15 @@ export async function startDownload(
       const absoluteVariantUrl = resolveUrl(task.url, variantUrl);
       const subResponse = await fetchWithRetry(proxyUrl(absoluteVariantUrl, referer), abortSignal);
       const subContent = await subResponse.text();
+
+      // Validate sub-playlist is actually m3u8, not an error page
+      if (subContent.trimStart().startsWith('<') || subContent.includes('<!DOCTYPE') || subContent.includes('<html')) {
+        throw new Error(
+          `Video quality variant returned an error page. ` +
+          `The content may be unavailable in the selected quality. Try a different source.`
+        );
+      }
+
       // Parse segments with durations and discontinuities from sub-playlist
       const { urls: segUrls, durations: segDurs, discontinuities: segDiscont } = extractSegmentsWithDurations(subContent, absoluteVariantUrl);
       segmentUrls = segUrls;
@@ -424,6 +558,7 @@ export async function startDownload(
     const chunks: (Uint8Array | undefined)[] = new Array(totalSegments);
     let totalDownloadedBytes = 0;
     let estimatedTotalBytes = 0;
+    let firstSegmentSize = 0; // Used to estimate total download size
 
     // Download segments
     // (global semaphore caps total across all downloads to 4)
@@ -432,6 +567,7 @@ export async function startDownload(
     let nextSegmentIndex = 0;
     let failedSegments = 0;
     let consecutiveFailures = 0;
+    let validationFailures = 0; // Segments that failed validation (not retry errors)
 
     const downloadNext = async (): Promise<void> => {
       while (nextSegmentIndex < segmentUrls.length) {
@@ -450,13 +586,38 @@ export async function startDownload(
         }
 
         try {
-          const data = await fetchSegment(segUrl, abortSignal, referer);
+          const data = await fetchSegment(segUrl, abortSignal, referer, index);
           chunks[index] = new Uint8Array(data);
           totalDownloadedBytes += data.byteLength;
           consecutiveFailures = 0; // reset on success
+
+          // Estimate total size from first segment
+          if (firstSegmentSize === 0 && data.byteLength >= MIN_SEGMENT_BYTES) {
+            firstSegmentSize = data.byteLength;
+            estimatedTotalBytes = firstSegmentSize * totalSegments;
+            console.log(
+              `[SV Download] Size estimate: first segment ${(firstSegmentSize / 1024).toFixed(1)} KB × ${totalSegments} = ` +
+              `${(estimatedTotalBytes / 1024 / 1024).toFixed(1)} MB estimated total`
+            );
+          }
         } catch (err) {
           if (err instanceof DOMException && err.name === 'AbortError') {
             throw err;
+          }
+          // Check if this was a validation failure (HTML error page, etc.)
+          const errMsg = err instanceof Error ? err.message : String(err);
+          if (errMsg.includes('HTML') || errMsg.includes('too small') || errMsg.includes('empty response')) {
+            validationFailures++;
+            console.error(`[SV Download] VALIDATION FAILURE on segment ${index}: ${errMsg}`);
+            // If >30% of first 10 segments fail validation, abort early —
+            // the entire stream is likely unavailable/blocked
+            if (validationFailures >= 3 && completedSegments < 10 && (validationFailures / (completedSegments + 1)) > 0.3) {
+              throw new Error(
+                `Download aborted: ${validationFailures} segments failed validation. ` +
+                `The video source appears to be unavailable or blocked by the CDN. ` +
+                `Try a different content source.`
+              );
+            }
           }
           failedSegments++;
           consecutiveFailures++;
@@ -469,15 +630,17 @@ export async function startDownload(
         );
         const elapsed = (Date.now() - startTime) / 1000;
         const speed = elapsed > 0 ? totalDownloadedBytes / elapsed : 0;
+        // Use estimated total for accurate ETA once we have it
+        const effectiveTotal = estimatedTotalBytes > 0 ? estimatedTotalBytes : totalDownloadedBytes;
         const eta =
-          speed > 0 ? (estimatedTotalBytes - totalDownloadedBytes) / speed : 0;
+          speed > 0 ? Math.max(0, (effectiveTotal - totalDownloadedBytes) / speed) : 0;
 
         onProgress({
           ...task,
           status: 'downloading',
           progress,
           downloadedBytes: totalDownloadedBytes,
-          totalBytes: Math.max(estimatedTotalBytes, totalDownloadedBytes),
+          totalBytes: Math.max(effectiveTotal, totalDownloadedBytes),
           speed,
           eta,
         });
@@ -502,6 +665,8 @@ export async function startDownload(
     }
 
     if (failedIndices.length > 0) {
+      console.log(`[SV Download] Retry pass: ${failedIndices.length} failed segments to retry`);
+
       const RETRY_PASS_MAX_ATTEMPTS = 10;
       const RETRY_PASS_DELAY_MS = 2000;
 
@@ -510,29 +675,53 @@ export async function startDownload(
           throw new DOMException('Download aborted', 'AbortError');
         }
         let succeeded = false;
+        let lastRetryError = '';
         for (let attempt = 0; attempt < RETRY_PASS_MAX_ATTEMPTS; attempt++) {
           if (abortSignal?.aborted) {
             throw new DOMException('Download aborted', 'AbortError');
           }
           try {
             await sleep(RETRY_PASS_DELAY_MS * (attempt + 1)); // progressive delay: 2s, 4s, 6s...
-            const data = await fetchSegment(segmentUrls[idx], abortSignal, referer);
+            const data = await fetchSegment(segmentUrls[idx], abortSignal, referer, idx);
             chunks[idx] = new Uint8Array(data);
             totalDownloadedBytes += data.byteLength;
             failedSegments--;
             succeeded = true;
             break;
-          } catch {
+          } catch (err) {
+            lastRetryError = err instanceof Error ? err.message : String(err);
             // Continue retrying
           }
         }
         if (!succeeded) {
           throw new Error(
             `Segment ${idx + 1}/${totalSegments} failed after exhaustive retry. ` +
-            'The server is rate-limiting. Try again later.'
+            `Last error: ${lastRetryError}. ` +
+            'The server may be rate-limiting or the content is unavailable.'
           );
         }
       }
+    }
+
+    // ── Post-download integrity check ─────────────────────────────────
+    // If too many validation failures occurred during download, the final
+    // blob will be corrupted. Fail explicitly instead of producing a broken file.
+    if (validationFailures > 0) {
+      const validSegments = totalSegments - failedSegments;
+      const validRatio = validSegments / totalSegments;
+      if (validRatio < 0.8) {
+        throw new Error(
+          `Download integrity check failed: only ${validSegments}/${totalSegments} segments ` +
+          `are valid (${(validRatio * 100).toFixed(0)}%). The video would be corrupted. ` +
+          `${validationFailures} segments contained invalid data (likely CDN blocking). ` +
+          `Try a different content source.`
+        );
+      }
+      console.warn(
+        `[SV Download] ⚠️ ${validationFailures} segments failed validation but ${validSegments}/${totalSegments} ` +
+        `are valid (${(validRatio * 100).toFixed(0)}%) — proceeding with partial content. ` +
+        `Some gaps may appear during playback.`
+      );
     }
 
     // Build segment buffers array — all segments are guaranteed present after retry pass.
@@ -605,17 +794,57 @@ export async function startDownload(
       console.log(
         `[SV Download] Remux SUCCESS — fMP4 blob: ${blob.size} bytes, type: '${blob.type}'`,
       );
+
+      // ── Post-remux integrity check ──────────────────────────────────
+      // Validate the remuxed blob is actually playable video.
+      if (blob.size < 100_000) {
+        // < 100KB for an entire movie/episode is definitely broken
+        throw new Error(
+          `Remuxed file is only ${(blob.size / 1024).toFixed(1)} KB — ` +
+          `too small to be valid video. The source data may be corrupted.`
+        );
+      }
+      // Quick check: fMP4 must start with ftyp box
+      const headerSlice = blob.slice(0, 12);
+      const headerBuf = await headerSlice.arrayBuffer();
+      const headerView = new DataView(headerBuf);
+      if (headerBuf.byteLength >= 8) {
+        const boxType = headerView.getUint32(4);
+        if (boxType !== MP4_FTYP) {
+          throw new Error(
+            `Remuxed file doesn't start with ftyp box — invalid fMP4 structure. ` +
+            `The remux produced garbage data.`
+          );
+        }
+      }
     } catch (remuxErr) {
+      // If the error is from our own integrity checks, re-throw it
+      // (don't fall back to raw TS for something that's fundamentally broken)
+      const msg = remuxErr instanceof Error ? remuxErr.message : String(remuxErr);
+      if (msg.includes('too small to be valid') || msg.includes("doesn't start with ftyp")) {
+        console.error(`[SV Download] Remux integrity check FAILED: ${msg}`);
+        throw remuxErr;
+      }
+
       // Remux failed — fall back to raw TS blob + MemoryHlsLoader path.
       // This preserves backward compatibility and handles edge cases where
       // the TS data uses codecs mux.js doesn't support.
       console.error(
         `[SV Download] Remux FAILED — falling back to raw TS + MemoryHlsLoader path.`,
-        `Error: ${remuxErr instanceof Error ? remuxErr.message : String(remuxErr)}`,
+        `Error: ${msg}`,
         `This is the LIKELY CAUSE of freezing/desync if it keeps happening.`,
         `Raw TS playback via HLS.js MemoryHlsLoader is inherently fragile.`,
       );
       blob = new Blob(segmentBuffers, { type: 'video/mp2t' });
+
+      // Validate raw TS blob too
+      if (blob.size < 100_000) {
+        throw new Error(
+          `Downloaded file is only ${(blob.size / 1024).toFixed(1)} KB — ` +
+          `too small to be valid video. The CDN may have returned error pages instead of video data. ` +
+          `Try a different content source.`
+        );
+      }
       console.log(
         `[SV Download] Fallback: raw TS blob created — ${blob.size} bytes, type: '${blob.type}'`,
       );
