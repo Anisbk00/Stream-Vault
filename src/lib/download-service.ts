@@ -415,56 +415,6 @@ async function _executeDownload(task: DownloadTask): Promise<void> {
       }
     }
 
-    // ── Step 4b: External subtitle fallback ─────────────────────────
-    // Most free streaming CDNs don't include #EXT-X-MEDIA TYPE=SUBTITLES
-    // in their m3u8 manifests. When no subtitles were found in the manifest,
-    // try fetching from external sources (SubDL, OpenSubtitles) using the
-    // content's TMDB ID + user's preferred subtitle languages.
-    let finalSubtitleTracks = result.subtitleTracks;
-    if (savedSubtitles.length === 0 && contentId) {
-      try {
-        const externalResult = await fetchExternalSubtitles(
-          contentId,
-          mediaType,
-          preferredSubtitles.length > 0 ? preferredSubtitles : [],
-          season,
-          episode,
-        );
-
-        if (externalResult.subtitles && Object.keys(externalResult.subtitles).length > 0) {
-          for (const [lang, vttContent] of Object.entries(externalResult.subtitles)) {
-            try {
-              await saveSubtitleToStorage(task.id, lang, vttContent);
-              savedSubtitles.push(lang);
-            } catch {
-              // Subtitle save failed — non-critical
-            }
-          }
-          if (externalResult.subtitleTracks.length > 0) {
-            finalSubtitleTracks = externalResult.subtitleTracks;
-          }
-        }
-      } catch {
-        // External subtitle fetch failed — non-critical, video is already downloaded
-      }
-    }
-
-    // Build combined subtitles map for auto-save (m3u8 + external)
-    const allSubtitlesForSave: Record<string, string> = { ...result.subtitles };
-    if (savedSubtitles.length > 0) {
-      for (const lang of savedSubtitles) {
-        if (!allSubtitlesForSave[lang]) {
-          try {
-            const { loadSubtitle } = await import('@/lib/download-storage');
-            const vttContent = await loadSubtitle(task.id, lang);
-            if (vttContent) allSubtitlesForSave[lang] = vttContent;
-          } catch {
-            // Read back failed — skip this subtitle in auto-save
-          }
-        }
-      }
-    }
-
     // Mark HLS downloads with segmentMeta so the player can generate
     // a fake m3u8 and use HLS.js for native TS demuxing.
     // fMP4 blobs (direct downloads) are played via direct blob URL.
@@ -511,8 +461,8 @@ async function _executeDownload(task: DownloadTask): Promise<void> {
           await writable.close();
 
           // Write subtitle files alongside the video
-          if (Object.keys(allSubtitlesForSave).length > 0) {
-            for (const [lang, vttContent] of Object.entries(allSubtitlesForSave)) {
+          if (result.subtitles) {
+            for (const [lang, vttContent] of Object.entries(result.subtitles)) {
               try {
                 const subFilename = filename.replace('.mp4', `.${lang}.vtt`);
                 const subHandle = await targetDir.getFileHandle(subFilename, { create: true });
@@ -543,7 +493,7 @@ async function _executeDownload(task: DownloadTask): Promise<void> {
       totalBytes: finalBlob.size,
       speed: 0,
       eta: 0,
-      subtitleTracks: finalSubtitleTracks,
+      subtitleTracks: result.subtitleTracks,
       hasSubtitles: savedSubtitles.length > 0,
       isHlsDownload,
       // Only store segmentMeta for raw TS downloads that need MemoryHlsLoader.
@@ -556,6 +506,93 @@ async function _executeDownload(task: DownloadTask): Promise<void> {
     toast.success('Download complete', {
       description: `${task.title} — go to Downloads to save or play`,
     });
+
+    // ── Step 5: External subtitle fallback (FIRE-AND-FORGET) ──────────
+    // Most free streaming CDNs don't include #EXT-X-MEDIA TYPE=SUBTITLES
+    // in their m3u8 manifests. When no subtitles were found in the manifest,
+    // try fetching from external sources (SubDL, OpenSubtitles) using the
+    // content's TMDB ID + user's preferred subtitle languages.
+    //
+    // CRITICAL: This runs AFTER the video download is complete and saved.
+    // It is completely non-blocking — if it fails, the video is already
+    // playable. It never affects the download pipeline.
+    if (savedSubtitles.length === 0 && contentId) {
+      (async () => {
+        try {
+          const externalResult = await fetchExternalSubtitles(
+            contentId,
+            mediaType,
+            preferredSubtitles.length > 0 ? preferredSubtitles : [],
+            season,
+            episode,
+          );
+
+          if (externalResult.subtitles && Object.keys(externalResult.subtitles).length > 0) {
+            // Save each subtitle to IndexedDB
+            for (const [lang, vttContent] of Object.entries(externalResult.subtitles)) {
+              try {
+                await saveSubtitleToStorage(task.id, lang, vttContent);
+              } catch {
+                // Subtitle save failed — non-critical
+              }
+            }
+
+            // Update task with subtitle info so the player can find them
+            const allTracks = [
+              ...(result.subtitleTracks || []),
+              ...externalResult.subtitleTracks,
+            ];
+            useDownloadStore.getState().updateTask(task.id, {
+              subtitleTracks: allTracks,
+              hasSubtitles: true,
+            });
+
+            console.log(
+              `[SV DownloadService] ✓ Fetched ${Object.keys(externalResult.subtitles).length} ` +
+              `external subtitle(s): ${Object.keys(externalResult.subtitles).join(', ')}`,
+            );
+
+            // Also write subtitle files to the download folder if configured
+            if (downloadFolderName) {
+              try {
+                const { loadDirectoryHandle } = await import('@/lib/download-storage');
+                const dirHandle = await loadDirectoryHandle();
+                if (dirHandle) {
+                  const perm = await dirHandle.queryPermission({ mode: 'readwrite' });
+                  if (perm === 'granted') {
+                    const safeTitle = task.title.replace(/[<>:"/\\|?*]/g, '_');
+                    let targetDir = dirHandle;
+                    if (task.mediaType === 'tv' && task.season !== undefined && task.episode !== undefined) {
+                      const seriesDir = await dirHandle.getDirectoryHandle(safeTitle, { create: true });
+                      const seasonDir = await seriesDir.getDirectoryHandle(`season_${String(task.season).padStart(2, '0')}`, { create: true });
+                      targetDir = await seasonDir.getDirectoryHandle(`episode_${String(task.episode).padStart(2, '0')}`, { create: true });
+                    } else {
+                      targetDir = await dirHandle.getDirectoryHandle(safeTitle, { create: true });
+                    }
+                    const filename = generateFilename(task.title, task.year, task.season, task.episode);
+                    for (const [lang, vttContent] of Object.entries(externalResult.subtitles)) {
+                      try {
+                        const subFilename = filename.replace('.mp4', `.${lang}.vtt`);
+                        const subHandle = await targetDir.getFileHandle(subFilename, { create: true });
+                        const subWritable = await subHandle.createWritable();
+                        await subWritable.write(vttContent);
+                        await subWritable.close();
+                      } catch {
+                        // Subtitle file write failed — non-critical
+                      }
+                    }
+                  }
+                }
+              } catch {
+                // Folder access failed — subtitles are still in IndexedDB
+              }
+            }
+          }
+        } catch {
+          // External subtitle fetch failed entirely — non-critical, video is already downloaded
+        }
+      })();
+    }
   } catch (err) {
     removeController(task.id);
     // Free any partial blob cache from failed download

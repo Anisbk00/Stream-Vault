@@ -1580,8 +1580,12 @@ function HlsVideoPlayer({
       }
     };
     const onDurationChange = () => {
-      setDuration(video.duration || 0);
-      console.log(`[SV Player] DURATION_CHANGE — duration=${video.duration?.toFixed(3)}s`);
+      // Guard against Infinity/NaN — common with MSE before endOfStream().
+      // Without this, progress = (currentTime / Infinity) * 100 = 0 → bar never shows.
+      if (isFinite(video.duration) && video.duration > 0) {
+        setDuration(video.duration);
+      }
+      console.log(`[SV Player] DURATION_CHANGE — duration=${video.duration}`);
     };
     const onProgress = () => {
       if (video.buffered.length > 0) {
@@ -2130,13 +2134,20 @@ function HlsVideoPlayer({
 
           // MSE duration probe: some browsers don't fire durationchange reliably
           // for progressive MSE. Poll until a valid duration is detected.
+          // Unlike onDurationChange, this re-checks periodically so it catches
+          // duration updates even after endOfStream() is called.
+          let durationProbeCount = 0;
           const durationProbe = setInterval(() => {
-            if (cancelled || !isFinite(video.duration) || video.duration <= 0) return;
-            setDuration(video.duration);
-            clearInterval(durationProbe);
+            durationProbeCount++;
+            if (cancelled) { clearInterval(durationProbe); return; }
+            if (isFinite(video.duration) && video.duration > 0) {
+              setDuration(video.duration);
+              // Stop after 3 consecutive successful reads (duration is stable)
+              if (durationProbeCount > 6) clearInterval(durationProbe);
+            }
+            // Safety: stop probing after 30s regardless
+            if (durationProbeCount > 60) clearInterval(durationProbe);
           }, 500);
-          // Safety: stop probing after 30s regardless
-          setTimeout(() => clearInterval(durationProbe), 30_000);
         }
       } catch (err) {
         // MSE failed — fall back to blob URL from fmp4Blob
