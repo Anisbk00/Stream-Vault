@@ -715,3 +715,33 @@ Stage Summary:
 - Added 15s timeout as safety net for PWA hangs
 - Added error feedback in catch block
 - Key files modified: src/components/streaming/LoginScreen.tsx
+---
+Task ID: 10
+Agent: Main Agent
+Task: Fix video download corruption — broken/freezing video, suspiciously fast download speed, add error handlers
+
+Work Log:
+- Read and analyzed entire download pipeline: hls-downloader.ts, download-service.ts, ts-to-mp4.ts, fmp4-mse-player.ts, download-storage.ts, StreamVaultApp.tsx handlePlayDownload, proxy route
+- Identified ROOT CAUSE #1 (CRITICAL): CDN returns HTTP 200 with HTML error pages instead of TS segment data. fetchSegment() accepted any response as valid → corrupt blob containing HTML instead of video → freezes on playback
+- Identified ROOT CAUSE #2: estimatedTotalBytes was initialized to 0 and never estimated → progress bar jumped fast (segment-based), speed/ETA were wrong → "suspiciously fast download" perception
+- Identified ROOT CAUSE #3: No post-download integrity checks → corrupt blobs were silently saved to IndexedDB as "completed"
+- Identified ROOT CAUSE #4: Silent catch blocks in retry pass and download service swallowed errors
+- Added validateSegmentData() in hls-downloader.ts: checks TS sync byte (0x47), MP4 ftyp box (0x66747970), minimum size (1KB), rejects HTML error pages explicitly
+- Added manifest validation: rejects HTML responses for m3u8 manifests and variant sub-playlists
+- Added early abort: if >30% of first 10 segments fail validation, download aborts with actionable error message
+- Added size estimation from first segment for accurate progress/speed/ETA
+- Added post-remux integrity check: validates ftyp box structure + minimum size
+- Added direct download validation: checks blob header for MP4 ftyp or TS sync byte
+- Added download-service.ts: final blob size sanity check (min 1MB), cleanup on failure
+- Added ts-to-mp4.ts: output/input ratio validation, init segment ftyp box validation
+- Improved retry pass: includes last error in failure message instead of generic text
+- Improved download-service.ts: cleanup of partial blob cache and IndexedDB on error
+- Lint: 0 errors (1 pre-existing warning)
+- Committed as 2f585a4, pushed to main
+
+Stage Summary:
+- 3 files modified: hls-downloader.ts (+245 lines), download-service.ts (+35 lines), ts-to-mp4.ts (+35 lines)
+- Video downloads now validate every segment is actual video data, not HTML
+- Progress/speed/ETA are now accurate with proper size estimation
+- Corrupt downloads fail early with actionable error messages instead of saving broken files
+- No design changes, no other components touched
