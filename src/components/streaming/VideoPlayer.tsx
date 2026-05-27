@@ -1295,7 +1295,7 @@ function HlsVideoPlayer({
   // Derived
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
   const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0;
-  const volumeIcon = muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
+  const VolumeIcon = muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
 
   // Controls auto-hide
   const resetHideTimer = useCallback(() => {
@@ -2127,6 +2127,16 @@ function HlsVideoPlayer({
               video.play().catch(() => {});
             });
           }
+
+          // MSE duration probe: some browsers don't fire durationchange reliably
+          // for progressive MSE. Poll until a valid duration is detected.
+          const durationProbe = setInterval(() => {
+            if (cancelled || !isFinite(video.duration) || video.duration <= 0) return;
+            setDuration(video.duration);
+            clearInterval(durationProbe);
+          }, 500);
+          // Safety: stop probing after 30s regardless
+          setTimeout(() => clearInterval(durationProbe), 30_000);
         }
       } catch (err) {
         // MSE failed — fall back to blob URL from fmp4Blob
@@ -2525,7 +2535,7 @@ function HlsVideoPlayer({
                 tabIndex={0}
               >
                 {/* Track background */}
-                <div className="absolute left-0 right-0 h-1 group-hover:h-1.5 transition-all duration-150 rounded-full bg-white/20">
+                <div className="absolute left-0 right-0 h-1.5 group-hover:h-2.5 transition-all duration-150 rounded-full bg-white/20">
                   {/* Buffered */}
                   <div
                     className="absolute left-0 top-0 h-full rounded-full bg-white/30 transition-all duration-200"
@@ -2534,12 +2544,12 @@ function HlsVideoPlayer({
                   {/* Played */}
                   <div
                     className="absolute left-0 top-0 h-full rounded-full bg-sv-red transition-all duration-100"
-                    style={{ width: `${progress}%` }}
+                    style={{ width: `${Math.min(progress, 100)}%` }}
                   />
                   {/* Thumb */}
                   <div
                     className="absolute top-1/2 -translate-y-1/2 w-3.5 h-3.5 rounded-full bg-sv-red shadow-md opacity-0 group-hover:opacity-100 transition-opacity duration-150"
-                    style={{ left: `calc(${progress}% - 7px)` }}
+                    style={{ left: `calc(${Math.min(progress, 100)}% - 7px)` }}
                   />
                 </div>
 
@@ -2563,11 +2573,22 @@ function HlsVideoPlayer({
 
               {/* Controls row */}
               <div className="flex items-center gap-2 md:gap-3">
-                {/* Left: Time */}
-                <div className="text-xs text-white/80 font-mono whitespace-nowrap">
-                  {formatTime(currentTime)}
-                  <span className="text-white/40 mx-1">/</span>
-                  {formatTime(duration)}
+                {/* Play/Pause + Time */}
+                <div className="flex items-center gap-1.5">
+                  {!isMemberLocked && (
+                    <button
+                      onClick={togglePlay}
+                      className="flex items-center justify-center min-h-[40px] min-w-[40px] text-white/70 hover:text-white transition-colors rounded-lg hover:bg-white/10"
+                      aria-label={playing ? 'Pause' : 'Play'}
+                    >
+                      {playing ? <Pause className="h-5 w-5" /> : <Play className="h-5 w-5 ml-0.5" fill="white" />}
+                    </button>
+                  )}
+                  <div className="text-xs text-white/80 font-mono whitespace-nowrap">
+                    {formatTime(currentTime)}
+                    <span className="text-white/40 mx-1">/</span>
+                    {formatTime(duration)}
+                  </div>
                 </div>
 
                 {/* Spacer */}
@@ -2688,7 +2709,7 @@ function HlsVideoPlayer({
                       className="flex items-center justify-center min-h-[40px] min-w-[40px] text-white/70 hover:text-white transition-colors rounded-lg hover:bg-white/10"
                       aria-label={muted ? 'Unmute' : 'Mute'}
                     >
-                      {volumeIcon && <volumeIcon className="h-5 w-5" />}
+                      <VolumeIcon className="h-5 w-5" />
                     </button>
                     <AnimatePresence>
                       {showVolumeSlider && (
