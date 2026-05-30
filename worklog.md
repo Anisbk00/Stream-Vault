@@ -1224,3 +1224,30 @@ Stage Summary:
 - Subtitles will work once Vercel deploys: API key is configured,
   parsing bug is fixed, code chain verified end-to-end
 - Popup blocker still handles VidAPI ads via window.open override
+---
+Task ID: 10
+Agent: Main Agent
+Task: VidSrc.fyi/ru + VidLink/VidFast as Tier 1, remove activity timeout
+
+Work Log:
+- User explicitly requested VidSrc.fyi/ru + VidLink/VidFast as Tier 1 (better quality)
+- Root cause of VidSrc failing: PLAYER_EVENT-based video activity timeout
+  - VidSrc loads fast (< 2s), doesn't send PLAYER_EVENT postMessages
+  - 3s fast-fail timer fires → tryNextSource() → cycles through all → black screen
+  - This timeout was designed for VidAPI error pages but is fundamentally
+    incompatible with providers that don't use postMessage protocol
+- Removed videoActivityTimeoutRef, VIDEO_ACTIVITY_TIMEOUT_MS, FAST_FAIL_ACTIVITY_TIMEOUT_MS
+- Removed timer start in handleIframeLoad
+- Removed timer clear in PLAYER_EVENT handler and load timeout cleanup
+- Retained 12s iframe load timeout (handles truly dead iframes)
+- No sandbox attributes anywhere (verified with grep)
+- Reordered providers: VidSrc premium + VidLink/VidFast → Tier 1, VidAPI → Tier 2
+- Lint passed (0 errors, 2 pre-existing warnings)
+- Pushed as commit c4c6635
+
+Stage Summary:
+- VidSrc.fyi/vidsrc.ru + VidLink/VidFast are now Tier 1
+- VidAPI is Tier 2 (popup ads blocked by existing window.open override)
+- Video activity timeout removed — non-postMessage providers will stay loaded
+- 12s load timeout retained for completely dead iframes
+- Subtitle fix (files[0].file_id) from 5d57bf7 included in this build
