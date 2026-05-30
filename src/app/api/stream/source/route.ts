@@ -26,11 +26,11 @@ const VIDSRC_PREMIUM_DOMAINS = [
   'vidsrc.ru',
 ] as const;
 
-/** VidLink / VidFast — high-performance embed providers */
-const VIDLINK_DOMAINS = [
-  'vidlink.pro',
-  'vidfast.pro',
-] as const;
+/** VidLink — high-performance embed provider */
+const VIDLINK_DOMAINS = ['vidlink.pro'] as const;
+
+/** VidFast — high-performance embed provider (backup to VidLink) */
+const VIDFAST_DOMAINS = ['vidfast.pro'] as const;
 
 /** VidSrc.cc v2 — 1080p with autoplay, uses IMDB IDs */
 const VIDSRC_CC_DOMAINS = [
@@ -260,7 +260,7 @@ export async function GET(request: NextRequest) {
       ...VIDSRC_PREMIUM_DOMAINS.map((domain) =>
         buildVidApiEmbedUrl(domain, mediaType, id, season, episode)
       ),
-      // VidLink / VidFast (biggest & fastest, premium quality)
+      // VidLink (biggest & fastest, premium quality)
       ...VIDLINK_DOMAINS.map((domain) =>
         buildVidLinkEmbedUrl(domain, mediaType, id, season, episode)
       ),
@@ -273,6 +273,10 @@ export async function GET(request: NextRequest) {
       ),
 
       // ── Tier 3: Good fallbacks ──────────────────────────────
+      // VidFast (high performance backup)
+      ...VIDFAST_DOMAINS.map((domain) =>
+        buildVidLinkEmbedUrl(domain, mediaType, id, season, episode)
+      ),
       // 2Embed (good coverage for movies not found on Tier 1-2)
       withQualityHint(
         mediaType === 'movie'
