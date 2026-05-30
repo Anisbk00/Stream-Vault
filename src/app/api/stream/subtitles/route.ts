@@ -55,7 +55,13 @@ async function searchSubtitles(
       },
     );
 
-    if (!response.ok) return [];
+    if (!response.ok) {
+      // Surface the actual HTTP error instead of silently returning empty
+      const statusText = response.statusText || '';
+      let body = '';
+      try { body = await response.text(); } catch { /* ignore */ }
+      throw new Error(`OpenSubtitles API error: ${response.status} ${statusText}${body ? ` — ${body.slice(0, 200)}` : ''}`);
+    }
 
     const data = await response.json();
     if (!data?.data || !Array.isArray(data.data)) return [];
@@ -75,7 +81,11 @@ async function searchSubtitles(
         releaseName: item.attributes.release || '',
       }))
       .sort((a: { downloadCount: number }, b: { downloadCount: number }) => b.downloadCount - a.downloadCount);
-  } catch {
+  } catch (err) {
+    // Propagate meaningful errors — caller should surface to user
+    if (err instanceof Error && err.message.startsWith('OpenSubtitles')) {
+      throw err;
+    }
     return [];
   }
 }
@@ -162,7 +172,13 @@ export async function GET(request: NextRequest) {
         return jsonResponse({ tracks: [], error: 'IMDB ID not found for this content' }, 200);
       }
 
-      const tracks = await searchSubtitles(imdbId, season, episode);
+      let tracks: Awaited<ReturnType<typeof searchSubtitles>> = [];
+      try {
+        tracks = await searchSubtitles(imdbId, season, episode);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Subtitle search failed';
+        return jsonResponse({ tracks: [], error: msg, imdbId }, 200);
+      }
       // Deduplicate by language (keep highest download count per language)
       const seen = new Map<string, (typeof tracks)[0]>();
       for (const track of tracks) {
