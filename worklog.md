@@ -1087,3 +1087,30 @@ Stage Summary:
 - Iframe sandbox relaxed with additional permissions
 - Fast-fail detection reduces dead-source cycling from 20s to 3s per broken embed
 - All changes pushed to origin/main
+---
+Task ID: 7
+Agent: Main Agent
+Task: Add premium high-quality embed providers, improve video quality
+
+Work Log:
+- Searched web for better streaming embed providers (6 parallel web searches)
+- Found and verified 5 new premium providers with documented embed URL formats:
+  - vidsrc.fyi: 1080p, subtitles, multi-server auto-failover
+  - vidsrc.ru: New official domain with docs, TMDB/IMDB support
+  - vidlink.pro: "Biggest and Fastest" streaming API
+  - vidfast.pro: Premium streaming quality, autoplay support
+  - vidsrc.cc (v2): 1080p with autoplay parameter
+- Added URL builder functions for VidLink and VidSrc.cc formats
+- Reordered provider tiers: premium providers first, vidapi.ru demoted to Tier 3 (ad-heavy)
+- Coordinated updates across 4 files:
+  - /api/stream/source/route.ts: New providers + URL builders + tier reorder
+  - next.config.ts: New domains in frame-src and connect-src CSP
+  - /api/stream/proxy/route.ts: New domains in ALLOWED_DOMAINS + CDN_REFERER_FALLBACKS
+  - VideoPlayer.tsx: New domains in isEmbedUrl, ALLOWED_MESSAGE_ORIGINS, getProviderLabel
+- Pushed to git: a5739c4
+
+Stage Summary:
+- 5 new premium embed providers added (vidsrc.fyi, vidsrc.ru, vidlink.pro, vidfast.pro, vidsrc.cc)
+- Provider priority reordered: premium → reliable → ad-heavy → Cloudflare
+- All CSP, proxy, and player recognition code updated consistently
+- VidAPI domains demoted from Tier 1 to Tier 3 (ad-heavy, lower quality)
