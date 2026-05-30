@@ -1087,7 +1087,6 @@ function IframeEmbedPlayer({
         ref={iframeRef}
         src={currentSrc}
         className="absolute inset-0 h-full w-full border-0"
-        sandbox="allow-scripts allow-same-origin"
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
         referrerPolicy="origin"
         title={iframeTitle || 'Video Player'}
