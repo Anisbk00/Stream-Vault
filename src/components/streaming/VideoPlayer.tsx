@@ -368,6 +368,10 @@ function IframeEmbedPlayer({
   // the provider's error message (e.g. vidapi.ru "Network error - all servers failed").
   const videoActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const VIDEO_ACTIVITY_TIMEOUT_MS = 20_000; // 20s after iframe load — if no video activity, try next source
+  const FAST_FAIL_ACTIVITY_TIMEOUT_MS = 3_000; // 3s for fast-loaded iframes (likely error pages)
+  // Track when currentSrc was set — if onLoad fires within 2s, the page is
+  // likely an error/redirect, not a real video embed (those take 3-5s minimum)
+  const srcSetTimeRef = useRef(Date.now());
 
   // iOS detection — iOS Safari/WKWebView does NOT support requestFullscreen()
   // on <div> elements (only on <video> elements). We use CSS-based fullscreen
@@ -458,11 +462,13 @@ function IframeEmbedPlayer({
       setHasError(false);
       setIsTrying(true);
       iframeLoadedRef.current = false;
+      srcSetTimeRef.current = Date.now();
 
       // Add a small delay before switching to avoid rapid iframe replacement
       // when multiple sources fail quickly (e.g., Cloudflare blocks)
       if (!immediate) {
         setTimeout(() => {
+          srcSetTimeRef.current = Date.now();
           setCurrentSrc(allUrls[nextIndex]);
         }, 800);
       } else {
@@ -477,6 +483,7 @@ function IframeEmbedPlayer({
   // Timeout: if embed doesn't load within 12s, try next source
   useEffect(() => {
     if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+    srcSetTimeRef.current = Date.now();
 
     loadTimeoutRef.current = setTimeout(() => {
       // iframe didn't signal it loaded — try next (with delay already built-in)
@@ -500,17 +507,23 @@ function IframeEmbedPlayer({
       clearTimeout(loadTimeoutRef.current);
       loadTimeoutRef.current = null;
     }
+    // Fast-fail detection: if onLoad fires within 2s of setting the src,
+    // the page is likely a network error page (chrome-error://chromewebdata/),
+    // a redirect to a dead page, or a lightweight error — not a real video embed.
+    // Real embed providers take 3-5s minimum to load (player JS, video init).
+    // Use a much shorter activity timeout to cycle quickly.
+    const loadDurationMs = Date.now() - srcSetTimeRef.current;
+    const isFastLoad = loadDurationMs < 2000;
+    const activityTimeout = isFastLoad ? FAST_FAIL_ACTIVITY_TIMEOUT_MS : VIDEO_ACTIVITY_TIMEOUT_MS;
     // Start video activity timer — if no PLAYER_EVENT is received within
-    // VIDEO_ACTIVITY_TIMEOUT_MS, the embed is considered broken.
-    // This catches the case where iframe HTML loads fine but the internal
-    // video player fails to initialize (CDN down, content unavailable, etc.)
+    // the timeout, the embed is considered broken.
     if (videoActivityTimeoutRef.current) clearTimeout(videoActivityTimeoutRef.current);
     videoActivityTimeoutRef.current = setTimeout(() => {
       // Only cycle if we haven't received any PLAYER_EVENT yet
       if (!hasReceivedProgressRef.current && !iframePlayingRef.current) {
         tryNextSource();
       }
-    }, VIDEO_ACTIVITY_TIMEOUT_MS);
+    }, activityTimeout);
   }, [tryNextSource]);
 
   // Listen for PLAYER_EVENT postMessage from iframe
@@ -1019,7 +1032,7 @@ function IframeEmbedPlayer({
         ref={iframeRef}
         src={currentSrc}
         className="absolute inset-0 h-full w-full border-0"
-        sandbox="allow-scripts allow-same-origin"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-top-navigation-by-user-activation"
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
         referrerPolicy="origin"
         title={iframeTitle || 'Video Player'}

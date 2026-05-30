@@ -573,58 +573,56 @@ export default function StreamVaultApp({ supabaseUrl, supabaseAnonKey }: StreamV
   );
 
   /** Pick best playback source:
-   *  Strategy: HLS/MP4 direct sources are PRIMARY — routed through /api/stream/proxy
-   *  via HLS.js xhrSetup, which goes through Vercel's global CDN. This bypasses
-   *  ISP blocks and geo-restrictions that commonly block embed provider domains
-   *  (vidapi.ru, vidsrc.to, etc.) in certain regions.
+   *  Strategy: Embed iframes are PRIMARY — they load the video on the embed
+   *  provider's own domain, bypassing CORS and CDN IP restrictions that
+   *  commonly block server-side proxies (Vercel datacenter IPs are often
+   *  blocked by CDNs like justhd.tv, returning 403 regardless of headers).
    *
-   *  If HLS fails (CDN 403, proxy error), VideoPlayer's handleHlsFatalError
-   *  automatically switches to embed iframe as fallback.
+   *  HLS/MP4 sources are included in the fallback list and can be tried
+   *  by HlsVideoPlayer's retry logic if the user manually cycles sources.
    */
   const pickBestSource = useCallback(
     (sourceData: Awaited<ReturnType<typeof fetchStreamSources>>, embedFallback: string) => {
-      // Prefer HLS/MP4 direct sources — routed through Vercel proxy (bypasses ISP blocks)
+      // Prefer embed URLs — they load directly in the browser (no proxy needed)
+      if (embedFallback) return embedFallback;
+      // No embed available — fall back to HLS/MP4 direct sources
       if (sourceData.sources && sourceData.sources.length > 0) {
         const hlsSource = sourceData.sources.find((s) => s.type === 'hls');
         if (hlsSource?.url) return hlsSource.url;
         const mp4Source = sourceData.sources.find((s) => s.type === 'mp4');
         if (mp4Source?.url) return mp4Source.url;
       }
-      // No direct sources available — fall back to embed
-      if (embedFallback) return embedFallback;
       return embedFallback;
     },
     [],
   );
 
   /** Build fallback URL list:
-   *  1. Other HLS/MP4 sources (same proxy path, different quality)
-   *  2. Embed URLs — tried by IframeEmbedPlayer via source cycling if HLS fails.
-   *     VideoPlayer's handleHlsFatalError switches to the first embed URL
-   *     when HLS hits a fatal error, then IframeEmbedPlayer cycles through
-   *     remaining embed URLs.
+   *  1. Embed URLs — primary fallback for IframeEmbedPlayer source cycling.
+   *  2. Other HLS/MP4 sources — included so HlsVideoPlayer can try them
+   *     if user manually cycles or if no embeds are available.
    */
   const buildFallbackList = useCallback(
     (sourceData: Awaited<ReturnType<typeof fetchStreamSources>>, playSrc: string) => {
       const urls: string[] = [];
 
-      // Add other direct HLS/MP4 sources first (same proxy mechanism)
-      if (sourceData.sources) {
-        for (const s of sourceData.sources) {
-          if (s.url && s.url !== playSrc && !urls.includes(s.url)) urls.push(s.url);
-        }
-      }
-
-      // Add embed URLs as fallbacks (used by IframeEmbedPlayer source cycling)
+      // Add embed URLs first — they load directly (no proxy needed)
       for (const fb of sourceData.fallbackUrls) {
         if (fb !== playSrc && !urls.includes(fb)) {
           urls.push(fb);
         }
       }
 
-      // Also include the primary embed URL if not already the play source
+      // Include the primary embed URL if not already the play source
       if (sourceData.embedUrl && sourceData.embedUrl !== playSrc && !urls.includes(sourceData.embedUrl)) {
         urls.push(sourceData.embedUrl);
+      }
+
+      // Add other direct HLS/MP4 sources last (require proxy — may 403 from datacenter IPs)
+      if (sourceData.sources) {
+        for (const s of sourceData.sources) {
+          if (s.url && s.url !== playSrc && !urls.includes(s.url)) urls.push(s.url);
+        }
       }
 
       return urls;
