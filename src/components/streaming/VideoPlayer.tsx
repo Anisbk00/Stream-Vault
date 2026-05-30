@@ -1032,7 +1032,7 @@ function IframeEmbedPlayer({
         ref={iframeRef}
         src={currentSrc}
         className="absolute inset-0 h-full w-full border-0"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-presentation allow-top-navigation-by-user-activation"
+        sandbox="allow-scripts allow-same-origin"
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
         referrerPolicy="origin"
         title={iframeTitle || 'Video Player'}
