@@ -1161,6 +1161,7 @@ function IframeEmbedPlayer({
                       setShowSubtitleMenu(false);
                     } else {
                       setSubtitleEnabled(true);
+                      setShowSubtitleMenu(true);
                     }
                   }}
                   className={cn(

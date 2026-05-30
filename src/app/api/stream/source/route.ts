@@ -255,32 +255,34 @@ export async function GET(request: NextRequest) {
     // Client cycles through fallbacks automatically if primary fails to load.
     // No server-side HEAD checks — 403 from Cloudflare doesn't mean dead in iframe.
     const allEmbedUrls = [
-      // ── Tier 1: Best subtitles — reliable, no Cloudflare ──────
+      // ── Tier 1: Best video quality — VidSrc premium ──────────
+      // VidSrc.fyi / VidSrc.ru (higher quality streams, 1080p)
+      ...VIDSRC_PREMIUM_DOMAINS.map((domain) =>
+        buildVidApiEmbedUrl(domain, mediaType, id, season, episode)
+      ),
+
+      // ── Tier 2: Best subtitles — reliable, no Cloudflare ────
       // VidAPI domains (best subtitle support, reliable uptime)
       // Note: vidapi.ru 301→vaplayer.ru, so vaplayer is the canonical domain
       ...VIDAPI_EMBED_DOMAINS.map((domain) =>
         withQualityHint(buildVidApiEmbedUrl(domain, mediaType, id, season, episode))
       ),
 
-      // ── Tier 2: Better video quality — 1080p, auto-failover ──
-      // VidSrc.fyi / VidSrc.ru (higher quality streams)
-      ...VIDSRC_PREMIUM_DOMAINS.map((domain) =>
-        buildVidApiEmbedUrl(domain, mediaType, id, season, episode)
-      ),
+      // ── Tier 3: High performance — 1080p, auto-failover ──────
       // VidLink / VidFast (biggest & fastest, premium quality)
       ...VIDLINK_DOMAINS.map((domain) =>
         buildVidLinkEmbedUrl(domain, mediaType, id, season, episode)
       ),
 
-      // ── Tier 3: Good fallbacks ──────────────────────────────
-      // 2Embed (good coverage for movies not found on Tier 1/2)
+      // ── Tier 4: Good fallbacks ──────────────────────────────
+      // 2Embed (good coverage for movies not found on Tier 1-3)
       withQualityHint(
         mediaType === 'movie'
           ? `https://www.2embed.cc/embed/${id}`
           : `https://www.2embed.cc/embedtv/${id}&s=${season}&e=${episode}`
       ),
 
-      // ── Tier 4: Lower priority ──────────────────────────────
+      // ── Tier 5: Lower priority ──────────────────────────────
       // VidSrc.me domains
       ...VIDSRC_ME_DOMAINS.map((domain) =>
         withQualityHint(buildVidSrcMeEmbedUrl(domain, mediaType, id, season, episode))
@@ -288,7 +290,7 @@ export async function GET(request: NextRequest) {
       // Embed.su (DNS unreliable from some networks, keep as fallback)
       buildVidApiEmbedUrl('embed.su', mediaType, id, season, episode),
 
-      // ── Tier 5: Last resort — Cloudflare protected, often blocked ──
+      // ── Tier 6: Last resort — Cloudflare protected, often blocked ──
       // VidSrc.cc v2 — behind Cloudflare JS challenge, rarely works in iframe
       ...VIDSRC_CC_DOMAINS.map((domain) =>
         buildVidSrcCcEmbedUrl(domain, mediaType, id, season, episode)
