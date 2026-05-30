@@ -255,17 +255,19 @@ export async function GET(request: NextRequest) {
     // Client cycles through fallbacks automatically if primary fails to load.
     // No server-side HEAD checks — 403 from Cloudflare doesn't mean dead in iframe.
     const allEmbedUrls = [
-      // ── Tier 1: Best video quality — VidSrc premium ──────────
-      // VidSrc.fyi / VidSrc.ru (higher quality streams, 1080p)
-      ...VIDSRC_PREMIUM_DOMAINS.map((domain) =>
-        buildVidApiEmbedUrl(domain, mediaType, id, season, episode)
-      ),
-
-      // ── Tier 2: Best subtitles — reliable, no Cloudflare ────
-      // VidAPI domains (best subtitle support, reliable uptime)
+      // ── Tier 1: Reliable playback — VidAPI ────────────────────
+      // VidAPI domains — reliable, no Cloudflare, sends PLAYER_EVENT
       // Note: vidapi.ru 301→vaplayer.ru, so vaplayer is the canonical domain
+      // Popup ads are blocked by client-side window.open override
       ...VIDAPI_EMBED_DOMAINS.map((domain) =>
         withQualityHint(buildVidApiEmbedUrl(domain, mediaType, id, season, episode))
+      ),
+
+      // ── Tier 2: Higher quality — VidSrc premium ─────────────
+      // VidSrc.fyi / VidSrc.ru (higher quality streams, 1080p)
+      // Fallback: may not send PLAYER_EVENT, causing timeout cycle
+      ...VIDSRC_PREMIUM_DOMAINS.map((domain) =>
+        buildVidApiEmbedUrl(domain, mediaType, id, season, episode)
       ),
 
       // ── Tier 3: High performance — 1080p, auto-failover ──────
