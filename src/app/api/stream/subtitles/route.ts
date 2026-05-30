@@ -62,11 +62,11 @@ async function searchSubtitles(
 
     // Map and sort by download count (highest first)
     return data.data
-      .filter((item: { attributes?: { feature_details?: { moviehash_match?: boolean }; url?: string }; file_id?: string }) =>
-        item.file_id && item.attributes?.url
+      .filter((item: { attributes?: { feature_details?: { moviehash_match?: boolean }; url?: string; language?: string }; id?: string; files?: { file_id: number }[] }) =>
+        item.id && item.attributes?.url && item.files?.length > 0
       )
-      .map((item: { id: string; file_id: string; attributes: { language: string; language_name?: string; download_count: number; release: string; feature_details?: { moviehash_match?: boolean } } }) => ({
-        id: String(item.file_id),
+      .map((item: { id: string; files: { file_id: number }[]; attributes: { language: string; language_name?: string; download_count: number; release: string; feature_details?: { moviehash_match?: boolean } } }) => ({
+        id: String(item.files[0].file_id),
         language: item.attributes.language,
         languageName: item.attributes.language_name || item.attributes.language,
         downloadCount: item.attributes.download_count || 0,
