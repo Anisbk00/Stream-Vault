@@ -416,13 +416,6 @@ function IframeEmbedPlayer({
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const iframeLoadedRef = useRef(false);
-  // Video activity timer — detects broken embeds where iframe HTML loads
-  // but the internal video player never starts (no PLAYER_EVENT received).
-  // Without this, the user is permanently stuck on a dead embed showing
-  // the provider's error message (e.g. vidapi.ru "Network error - all servers failed").
-  const videoActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const VIDEO_ACTIVITY_TIMEOUT_MS = 20_000; // 20s after iframe load — if no video activity, try next source
-  const FAST_FAIL_ACTIVITY_TIMEOUT_MS = 3_000; // 3s for fast-loaded iframes (likely error pages)
   // Track when currentSrc was set — if onLoad fires within 2s, the page is
   // likely an error/redirect, not a real video embed (those take 3-5s minimum)
   const srcSetTimeRef = useRef(Date.now());
@@ -548,7 +541,6 @@ function IframeEmbedPlayer({
 
     return () => {
       if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
-      if (videoActivityTimeoutRef.current) clearTimeout(videoActivityTimeoutRef.current);
     };
   }, [currentSrc, tryNextSource]);
 
@@ -561,23 +553,6 @@ function IframeEmbedPlayer({
       clearTimeout(loadTimeoutRef.current);
       loadTimeoutRef.current = null;
     }
-    // Fast-fail detection: if onLoad fires within 2s of setting the src,
-    // the page is likely a network error page (chrome-error://chromewebdata/),
-    // a content-unavailable page ("This media is not available"), or a
-    // lightweight error — not a real video embed. Real embed providers take
-    // 3-5s minimum to load (player JS, video init).
-    const loadDurationMs = Date.now() - srcSetTimeRef.current;
-    const isFastLoad = loadDurationMs < 2000;
-    const activityTimeout = isFastLoad ? FAST_FAIL_ACTIVITY_TIMEOUT_MS : VIDEO_ACTIVITY_TIMEOUT_MS;
-    // Start video activity timer — if no PLAYER_EVENT is received within
-    // the timeout, the embed is considered broken.
-    if (videoActivityTimeoutRef.current) clearTimeout(videoActivityTimeoutRef.current);
-    videoActivityTimeoutRef.current = setTimeout(() => {
-      // Only cycle if we haven't received any PLAYER_EVENT yet
-      if (!hasReceivedProgressRef.current && !iframePlayingRef.current) {
-        tryNextSource();
-      }
-    }, activityTimeout);
   }, [tryNextSource]);
 
   // Listen for PLAYER_EVENT postMessage from iframe
@@ -598,11 +573,7 @@ function IframeEmbedPlayer({
           clearTimeout(loadTimeoutRef.current);
           loadTimeoutRef.current = null;
         }
-        // Clear video activity timer — embed is confirmed working
-        if (videoActivityTimeoutRef.current) {
-          clearTimeout(videoActivityTimeoutRef.current);
-          videoActivityTimeoutRef.current = null;
-        }
+
 
         if (!data) return;
 
