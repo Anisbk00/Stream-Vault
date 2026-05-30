@@ -1114,3 +1114,27 @@ Stage Summary:
 - Provider priority reordered: premium → reliable → ad-heavy → Cloudflare
 - All CSP, proxy, and player recognition code updated consistently
 - VidAPI domains demoted from Tier 1 to Tier 3 (ad-heavy, lower quality)
+---
+Task ID: 8
+Agent: Main Agent
+Task: Test all embed providers and fix broken ones
+
+Work Log:
+- Tested 8 providers with curl (TMDB 550 = Fight Club movie + TMDB 1396 = Breaking Bad TV)
+- Results:
+  - vidsrc.fyi: ✅ 200 both (1.2KB HTML shell + iframe)
+  - vidsrc.ru: ✅ 200 both (1.8KB Vite/React player)
+  - vidlink.pro: ✅ 200 both (78KB/19KB full Next.js embed with TMDB data)
+  - vidfast.pro: ✅ 200 both (168KB/169KB premium Next.js embed)
+  - vidsrc.cc v2: ❌ 403 Cloudflare JS challenge ("Just a moment...")
+  - embed.su: ❌ DNS failure (domain doesn't resolve)
+  - vidapi.ru: ⚠️ 301 redirects to vaplayer.ru
+  - vidsrcme.ru: ✅ 200 (58KB)
+- Fixed: moved vidsrc.cc from Tier 1 to Tier 5, embed.su from Tier 1 to Tier 4
+- Pushed: aaaf0ef
+
+Stage Summary:
+- 4 new premium providers verified working (vidsrc.fyi, vidsrc.ru, vidlink.pro, vidfast.pro)
+- 2 broken providers demoted (vidsrc.cc CF blocked, embed.su DNS dead)
+- vidapi.ru identified as duplicate of vaplayer.ru (301 redirect)
+- Final tier order: premium → 2embed → vidapi/vaplayer → vidsrc.me/embed.su → CF-blocked
