@@ -1100,7 +1100,7 @@ function IframeEmbedPlayer({
 
             {/* Right side — CC → Fullscreen (positioned at ~1/5 from bottom) */}
             <motion.div
-              className="absolute bottom-[15%] right-0 z-[115] flex items-center pr-3"
+              className="absolute bottom-[12%] right-0 z-[115] flex items-center pr-3"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}

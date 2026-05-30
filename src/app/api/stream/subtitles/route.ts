@@ -143,8 +143,8 @@ export async function GET(request: NextRequest) {
 
   try {
     const action = request.nextUrl.searchParams.get('action');
-    const tmdbId = request.nextUrl.searchParams.get('tmdbId');
-    const imdbIdParam = request.nextUrl.searchParams.get('imdbId');
+    const tmdbId = request.nextUrl.searchParams.get('tmdbId') || undefined;
+    const imdbIdParam = request.nextUrl.searchParams.get('imdbId') || undefined;
 
     if (!tmdbId && !imdbIdParam) {
       return errorResponse('Missing "tmdbId" or "imdbId" query parameter', 400);

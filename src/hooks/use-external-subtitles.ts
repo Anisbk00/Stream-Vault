@@ -75,9 +75,12 @@ export function useExternalSubtitles({
       try {
         const params = new URLSearchParams({
           action: 'search',
-          tmdbId: String(tmdbId || ''),
           type: mediaType || 'movie',
         });
+        // Only send tmdbId/imdbId if they have actual values — empty strings
+        // are falsy in JS but URLSearchParams.get() returns "" not null,
+        // breaking all falsy checks in the API route's fallback logic
+        if (tmdbId) params.set('tmdbId', String(tmdbId));
         if (imdbId) params.set('imdbId', imdbId);
         if (season !== undefined) params.set('season', String(season));
         if (episode !== undefined) params.set('episode', String(episode));
