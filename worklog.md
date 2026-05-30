@@ -1158,3 +1158,25 @@ Stage Summary:
 - VidAPI is now Tier 2 (fallback with better subtitles)
 - CC button UX improved — clicking opens subtitle track selector immediately
 - Subtitle "No subtitles available" is an API/configuration issue, not a code bug — requires OPENSUBTITLES_API_KEY env var to be set on deployment
+---
+Task ID: 7
+Agent: Main Agent
+Task: Fix subtitle "No subtitles available" — API response parsing bug
+
+Work Log:
+- User confirmed OPENSUBTITLES_API_KEY is configured on Vercel
+- Added API key to local .env for development testing
+- Tested OpenSubtitles API directly with curl — confirmed 827 results for Fight Club
+- Inspected API response structure: file_id is nested inside files[0].file_id, NOT at top level
+- Root cause: filter at line 65 checked item.file_id which is ALWAYS undefined in OpenSubtitles v1 API
+- All subtitle results were silently filtered out → 0 tracks → "No subtitles available"
+- Fixed filter: check item.id && item.attributes?.url && item.files?.length > 0
+- Fixed map: use item.files[0].file_id for the download file identifier
+- Lint passed (0 errors)
+- Pushed as commit 5d57bf7
+
+Stage Summary:
+- Critical subtitle bug fixed — OpenSubtitles API response structure mismatch
+- Subtitles will now work correctly once deployed (Vercel already has API key)
+- CC button opens menu directly (previous commit bd2825b)
+- VidSrc is Tier 1, VidAPI is Tier 2 (previous commit bd2825b)
