@@ -126,9 +126,10 @@ export async function GET(request: NextRequest) {
   try {
     const action = request.nextUrl.searchParams.get('action');
     const tmdbId = request.nextUrl.searchParams.get('tmdbId');
+    const imdbIdParam = request.nextUrl.searchParams.get('imdbId');
 
-    if (!tmdbId) {
-      return errorResponse('Missing "tmdbId" query parameter', 400);
+    if (!tmdbId && !imdbIdParam) {
+      return errorResponse('Missing "tmdbId" or "imdbId" query parameter', 400);
     }
 
     const type = (request.nextUrl.searchParams.get('type') || 'movie') as 'movie' | 'tv';
@@ -149,7 +150,12 @@ export async function GET(request: NextRequest) {
         return jsonResponse({ tracks: [], error: 'OpenSubtitles API key not configured' }, 200);
       }
 
-      const imdbId = await fetchImdbId(tmdbId, type);
+      // Use IMDB ID directly if provided (skips TMDB lookup).
+      // Otherwise, look up IMDB ID from TMDB ID.
+      let imdbId = imdbIdParam;
+      if (!imdbId && tmdbId) {
+        imdbId = await fetchImdbId(tmdbId, type);
+      }
       if (!imdbId) {
         return jsonResponse({ tracks: [], error: 'IMDB ID not found for this content' }, 200);
       }

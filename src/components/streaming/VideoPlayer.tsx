@@ -334,7 +334,8 @@ function IframeEmbedPlayer({
     loading: subtitleLoading,
     error: subtitleError,
   } = useExternalSubtitles({
-    contentId: imdbId || contentId || undefined,
+    tmdbId: contentId,
+    imdbId: imdbId || undefined,
     mediaType,
     season,
     episode,
@@ -1086,6 +1087,7 @@ function IframeEmbedPlayer({
         ref={iframeRef}
         src={currentSrc}
         className="absolute inset-0 h-full w-full border-0"
+        sandbox="allow-scripts allow-same-origin"
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
         referrerPolicy="origin"
         title={iframeTitle || 'Video Player'}
@@ -1127,9 +1129,8 @@ function IframeEmbedPlayer({
         </div>
       )}
 
-      {/* Title + back button overlay — shows on tap, auto-hides after 3s
-          on desktop. Stays visible on touch devices. Disappears when overlay
-          hides — no interference with embed controls. */}
+      {/* Controls overlay — shows on tap, auto-hides after 3s
+          on desktop. Stays visible on touch devices. */}
       <AnimatePresence>
         {showOverlay && !isTrying && (
           <motion.div
@@ -1149,103 +1150,99 @@ function IframeEmbedPlayer({
               <ArrowLeft className="h-6 w-6" />
             </button>
 
-            {/* Title */}
-            {iframeTitle && (
-              <h1 className="text-white text-sm font-medium truncate max-w-[70%] text-center px-4">
-                {iframeTitle}
-              </h1>
-            )}
-
-            {/* Fullscreen button */}
-            <button
-              onClick={toggleFullscreen}
-              className="flex items-center justify-center min-h-[44px] min-w-[44px] text-white/90 hover:text-white transition-colors rounded-lg hover:bg-white/10 -mr-1"
-              aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-            >
-              {isFullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
-            </button>
-
-            {/* CC / Subtitle toggle button */}
-            <div className="relative">
-              <button
-                onClick={() => {
-                  if (subtitleEnabled) {
-                    setSubtitleEnabled(false);
-                    setShowSubtitleMenu(false);
-                  } else {
-                    setSubtitleEnabled(true);
-                  }
-                }}
-                className={cn(
-                  'flex items-center justify-center min-h-[44px] min-w-[44px] rounded-lg hover:bg-white/10 -mr-1 transition-colors',
-                  subtitleEnabled ? 'text-yellow-400' : 'text-white/90 hover:text-white',
-                )}
-                aria-label={subtitleEnabled ? 'Disable subtitles' : 'Enable subtitles'}
-              >
-                {subtitleEnabled ? <Captions className="h-5 w-5" /> : <CaptionsOff className="h-5 w-5" />}
-              </button>
-
-              {/* Subtitle language dropdown */}
-              <AnimatePresence>
-                {showSubtitleMenu && subtitleEnabled && (
-                  <>
-                    <div className="fixed inset-0 z-[0]" onClick={() => setShowSubtitleMenu(false)} />
-                    <motion.div
-                      initial={{ opacity: 0, y: -4 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, y: -4 }}
-                      transition={{ duration: 0.15 }}
-                      className="absolute top-full right-0 mt-1 z-[200] bg-neutral-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-xl overflow-hidden min-w-[200px]"
-                    >
-                      <div className="p-2">
-                        <p className="text-white/50 text-xs font-medium px-2 py-1">Subtitles</p>
-                        {subtitleLoading && (
-                          <div className="flex items-center gap-2 px-2 py-2 text-white/60 text-xs">
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                            Loading…
-                          </div>
-                        )}
-                        {subtitleError && !subtitleLoading && (
-                          <p className="px-2 py-2 text-red-400 text-xs">{subtitleError}</p>
-                        )}
-                        {!subtitleLoading && subtitleTracks.length === 0 && !subtitleError && (
-                          <p className="px-2 py-2 text-white/40 text-xs">No subtitles available</p>
-                        )}
-                        {subtitleTracks.map((track) => (
-                          <button
-                            key={track.language}
-                            onClick={() => {
-                              selectSubtitleTrack(track);
-                              setShowSubtitleMenu(false);
-                            }}
-                            className={cn(
-                              'w-full flex items-center justify-between px-2 py-2 text-sm rounded-md transition-colors',
-                              selectedTrack?.id === track.id
-                                ? 'bg-white/15 text-white'
-                                : 'text-white/70 hover:bg-white/10 hover:text-white',
-                            )}
-                          >
-                            <span>{track.languageName}</span>
-                            {selectedTrack?.id === track.id && (
-                              <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </motion.div>
-                  </>
-                )}
-              </AnimatePresence>
-              {/* Show menu button when CC is on but menu is hidden */}
-              {subtitleEnabled && !showSubtitleMenu && (
+            {/* Right-side controls: CC → Fullscreen */}
+            <div className="flex items-center">
+              {/* CC / Subtitle toggle button */}
+              <div className="relative">
                 <button
-                  onClick={() => setShowSubtitleMenu(true)}
-                  className="absolute top-full right-0 mt-0.5 z-[199] flex items-center justify-center min-h-[32px] min-w-[32px] rounded-md bg-black/60 text-white/70 hover:text-white transition-colors"
-                  aria-label="Subtitle settings"
+                  onClick={() => {
+                    if (subtitleEnabled) {
+                      setSubtitleEnabled(false);
+                      setShowSubtitleMenu(false);
+                    } else {
+                      setSubtitleEnabled(true);
+                    }
+                  }}
+                  className={cn(
+                    'flex items-center justify-center min-h-[44px] min-w-[44px] rounded-lg hover:bg-white/10 transition-colors',
+                    subtitleEnabled ? 'text-yellow-400' : 'text-white/90 hover:text-white',
+                  )}
+                  aria-label={subtitleEnabled ? 'Disable subtitles' : 'Enable subtitles'}
                 >
-                  <Languages className="h-3.5 w-3.5" />
+                  {subtitleEnabled ? <Captions className="h-5 w-5" /> : <CaptionsOff className="h-5 w-5" />}
                 </button>
-              )}
+
+                {/* Subtitle language dropdown */}
+                <AnimatePresence>
+                  {showSubtitleMenu && subtitleEnabled && (
+                    <>
+                      <div className="fixed inset-0 z-[0]" onClick={() => setShowSubtitleMenu(false)} />
+                      <motion.div
+                        initial={{ opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -4 }}
+                        transition={{ duration: 0.15 }}
+                        className="absolute top-full right-0 mt-1 z-[200] bg-neutral-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-xl overflow-hidden min-w-[200px]"
+                      >
+                        <div className="p-2">
+                          <p className="text-white/50 text-xs font-medium px-2 py-1">Subtitles</p>
+                          {subtitleLoading && (
+                            <div className="flex items-center gap-2 px-2 py-2 text-white/60 text-xs">
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                              Loading…
+                            </div>
+                          )}
+                          {subtitleError && !subtitleLoading && (
+                            <p className="px-2 py-2 text-red-400 text-xs">{subtitleError}</p>
+                          )}
+                          {!subtitleLoading && subtitleTracks.length === 0 && !subtitleError && (
+                            <p className="px-2 py-2 text-white/40 text-xs">No subtitles available</p>
+                          )}
+                          {subtitleTracks.map((track) => (
+                            <button
+                              key={track.language}
+                              onClick={() => {
+                                selectSubtitleTrack(track);
+                                setShowSubtitleMenu(false);
+                              }}
+                              className={cn(
+                                'w-full flex items-center justify-between px-2 py-2 text-sm rounded-md transition-colors',
+                                selectedTrack?.id === track.id
+                                  ? 'bg-white/15 text-white'
+                                  : 'text-white/70 hover:bg-white/10 hover:text-white',
+                              )}
+                            >
+                              <span>{track.languageName}</span>
+                              {selectedTrack?.id === track.id && (
+                                <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </motion.div>
+                    </>
+                  )}
+                </AnimatePresence>
+                {/* Show menu button when CC is on but menu is hidden */}
+                {subtitleEnabled && !showSubtitleMenu && (
+                  <button
+                    onClick={() => setShowSubtitleMenu(true)}
+                    className="absolute top-full right-0 mt-0.5 z-[199] flex items-center justify-center min-h-[32px] min-w-[32px] rounded-md bg-black/60 text-white/70 hover:text-white transition-colors"
+                    aria-label="Subtitle settings"
+                  >
+                    <Languages className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </div>
+
+              {/* Fullscreen button — right after subtitle icon */}
+              <button
+                onClick={toggleFullscreen}
+                className="flex items-center justify-center min-h-[44px] min-w-[44px] text-white/90 hover:text-white transition-colors rounded-lg hover:bg-white/10 -mr-1"
+                aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              >
+                {isFullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
+              </button>
             </div>
           </motion.div>
         )}

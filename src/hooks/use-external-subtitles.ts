@@ -5,8 +5,10 @@ import type { SubtitleTrack, SubtitleCue } from '@/types/subtitles';
 import { parseSubtitles } from '@/lib/subtitles/parser';
 
 interface UseExternalSubtitlesOptions {
-  /** TMDB content ID */
-  contentId: string | number | undefined;
+  /** TMDB content ID — used when IMDB ID is not available */
+  tmdbId?: string | number;
+  /** IMDB ID (e.g. tt1234567) — used directly when available, skips TMDB lookup */
+  imdbId?: string | null;
   /** Content type */
   mediaType?: 'movie' | 'tv';
   /** Season number (TV only) */
@@ -41,7 +43,8 @@ interface UseExternalSubtitlesReturn {
 }
 
 export function useExternalSubtitles({
-  contentId,
+  tmdbId,
+  imdbId,
   mediaType,
   season,
   episode,
@@ -58,7 +61,10 @@ export function useExternalSubtitles({
 
   // ── Fetch available tracks when CC is enabled ──
   useEffect(() => {
-    if (!enabled || !contentId) return;
+    if (!enabled) return;
+    // Need either IMDB ID or TMDB ID to search subtitles
+    const identifier = imdbId || tmdbId;
+    if (!identifier) return;
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -69,9 +75,10 @@ export function useExternalSubtitles({
       try {
         const params = new URLSearchParams({
           action: 'search',
-          tmdbId: String(contentId),
+          tmdbId: String(tmdbId || ''),
           type: mediaType || 'movie',
         });
+        if (imdbId) params.set('imdbId', imdbId);
         if (season !== undefined) params.set('season', String(season));
         if (episode !== undefined) params.set('episode', String(episode));
 
@@ -99,7 +106,7 @@ export function useExternalSubtitles({
 
     fetchTracks();
     return () => { controller.abort(); };
-  }, [enabled, contentId, mediaType, season, episode]);
+  }, [enabled, tmdbId, imdbId, mediaType, season, episode]);
 
   // ── Download and parse selected track ──
   useEffect(() => {
