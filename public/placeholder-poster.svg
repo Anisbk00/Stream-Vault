@@ -1,0 +1,9 @@
+<svg width="300" height="450" viewBox="0 0 300 450" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="300" height="450" fill="#1a1a1a"/>
+  <rect x="1" y="1" width="298" height="448" rx="8" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>
+  <g transform="translate(150, 190)">
+    <circle r="35" fill="rgba(255,255,255,0.06)"/>
+    <path d="M-8 -12 L14 0 L-8 12 Z" fill="rgba(255,255,255,0.15)"/>
+  </g>
+  <text x="150" y="250" text-anchor="middle" fill="rgba(255,255,255,0.2)" font-family="system-ui" font-size="13">No Image</text>
+</svg>

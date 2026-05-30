@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://watanflix.com/en",
+    "name": "WatanFlix: Watch TV Series & Movies Online For FREE - Arabic",
+    "snippet": "WatanFlix is the largest platform to watch exclusive Arab series in a high quality through computers, mobiles and tablets for free.",
+    "host_name": "watanflix.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://watanflix.com/en/type/%D8%AF%D8%B1%D8%A7%D9%85%D8%A7?page=2",
+    "name": "Watch TV Series & Movies Online For FREE - Arabic  - WatanFlix",
+    "snippet": "WatanFlix is the largest platform to watch exclusive Arab series in a high quality through computers, mobiles and tablets for free.",
+    "host_name": "watanflix.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.youtube.com/watch?v=LgVk7rks-40",
+    "name": "Building a Free Movie Streaming Site with NextJS 15, and TMDb API",
+    "snippet": "Learn how to build a fully functional movie streaming website from scratch using Next.js, TMDb API for movie data, and VidSrc for streaming.",
+    "host_name": "www.youtube.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/Inside4ndroid/TMDB-Embed-API",
+    "name": "Inside4ndroid/TMDB-Embed-API - GitHub",
+    "snippet": "An api to get embed sources using tmdb id. Contribute to Inside4ndroid/TMDB-Embed-API development by creating an account on GitHub.",
+    "host_name": "github.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://zylalabs.com/en/api-marketplace/tag/free+movie+collection",
+    "name": "Best Free movie collection APIs | Zyla API Hub",
+    "snippet": "This API provides detailed information on the latest upcoming films, including trailers, thumbnails, embed URLs, and YouTube IDs of the most recent movie ...",
+    "host_name": "zylalabs.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.blackhatworld.com/seo/movie-streaming-site-with-api-question.1516650",
+    "name": "Movie Streaming Site with API question | BlackHatWorld",
+    "snippet": "I am planning on starting a movie streaming site using an api which will automatically add a bunch of movies to my site, my question is, atm my web hosting ...",
+    "host_name": "www.blackhatworld.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/overview",
+    "name": "Embedded Signup - Meta for Developers - Facebook",
+    "snippet": "The Embedded Signup flow gathers business-related information from your business customers, automatically generates all WhatsApp assets needed by the ...",
+    "host_name": "developers.facebook.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://player.support.brightcove.com/publish/available-options-standard-iframe-embed-code.html",
+    "name": "Available Options for the Iframe Embed Code",
+    "snippet": "Available Options for the Iframe Embed Code. In this topic, you will learn about the use and configuration of the iframe embed code.",
+    "host_name": "player.support.brightcove.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/learnprogramming/comments/1esy7m7/is_there_an_apisome_kind_of_site_where_i_can",
+    "name": "Is there an api/some kind of site where I can access videos/movies",
+    "snippet": "I haven't seen one that provides free access to legal streaming movies, mainly because of licensing issues and the high cost of streaming. If ...",
+    "host_name": "www.reddit.com",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://ai.google.dev/gemini-api/docs/embeddings",
+    "name": "Embeddings | Gemini API - Google AI for Developers",
+    "snippet": "The Gemini API offers embedding models to generate embeddings for text, images, video, and other content. These resulting embeddings can then be used for tasks ...",
+    "host_name": "ai.google.dev",
+    "rank": 9,
+    "date": "",
+    "favicon": ""
+  }
+]
