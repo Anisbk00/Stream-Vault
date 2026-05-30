@@ -40,11 +40,16 @@ async function searchSubtitles(
 
   try {
     const params = new URLSearchParams();
-    // Prefer imdb_id when available (most precise), fallback to tmdb_id
-    if (imdbId) {
-      params.set('imdb_id', parseInt(imdbId.replace('tt', '')).toString());
-    } else if (tmdbId) {
+    // For TV shows: use tmdb_id only — OpenSubtitles uses AND logic when both
+    // imdb_id and tmdb_id are sent, returning 0 results. The series IMDB ID
+    // conflicts with the episode-specific lookup. tmdb_id alone works reliably
+    // for both movies and TV (verified: The Boys S5E1 has 0 via imdb_id, 51 via tmdb_id).
+    if (tmdbId) {
       params.set('tmdb_id', parseInt(tmdbId).toString());
+    }
+    // For movies without tmdbId: fallback to imdb_id only
+    if (!tmdbId && imdbId) {
+      params.set('imdb_id', parseInt(imdbId.replace('tt', '')).toString());
     }
     if (season !== undefined) params.set('season_number', season.toString());
     if (episode !== undefined) params.set('episode_number', episode.toString());
@@ -76,8 +81,8 @@ async function searchSubtitles(
     // Note: OpenSubtitles API nests files[] inside item.attributes.files,
     // NOT at the item top level.
     return data.data
-      .filter((item: { id?: string; attributes?: { url?: string; language?: string; files?: { file_id: number }[] } }) =>
-        item.id && item.attributes?.url && (item.attributes?.files?.length ?? 0) > 0
+      .filter((item: { id?: string; attributes?: { language?: string; files?: { file_id: number }[] } }) =>
+        item.id && (item.attributes?.files?.length ?? 0) > 0
       )
       .map((item: { attributes: { files: { file_id: number }[]; language: string; language_name?: string; download_count: number; release: string } }) => ({
         id: String(item.attributes.files[0].file_id),
