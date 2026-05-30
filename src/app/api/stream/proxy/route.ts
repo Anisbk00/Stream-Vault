@@ -36,6 +36,12 @@ const CDN_REFERER_FALLBACKS = [
   'https://vidsrc-embed.ru/',
   'https://vidsrc-embed.su/',
   'https://vsrc.su/',
+  'https://vidsrc.fyi/',
+  'https://vidsrc.ru/',
+  'https://vidsrc.cc/',
+  // Premium providers
+  'https://vidlink.pro/',
+  'https://vidfast.pro/',
   // Other embed providers
   'https://embed.su/',
   'https://2embed.cc/',
@@ -84,6 +90,8 @@ const ALLOWED_DOMAINS: ReadonlySet<string> = new Set([
   'vidsrc.pm',
   'vidsrc.me',
   'vidsrc.cc',
+  'vidsrc.fyi',
+  'vidsrc.ru',
   'vidsrcme.ru',
   'vidsrcme.su',
   'vidsrc-embed.ru',
@@ -91,6 +99,16 @@ const ALLOWED_DOMAINS: ReadonlySet<string> = new Set([
   'vidsrc-me.ru',
   'vidsrc-me.su',
   'vsrc.su',
+  // Premium embed providers
+  'vidlink.pro',
+  'vidfast.pro',
+  'vidfast.net',
+  'vidfast.in',
+  'vidfast.io',
+  'vidfast.me',
+  'vidfast.pm',
+  'vidfast.xyz',
+  'vidninja.pro',
   // Embed providers
   'embed.su',
   '2embed.cc',

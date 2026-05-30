@@ -174,7 +174,9 @@ function isEmbedUrl(src: string): boolean {
     /vidsrcme\./i.test(src) ||
     /vidsrc-embed\./i.test(src) ||
     /vidsrc-me\./i.test(src) ||
-    /filmu\.in/i.test(src)
+    /filmu\.in/i.test(src) ||
+    /vidlink\.pro/i.test(src) ||
+    /vidfast\.(?:pro|net|in|io|me|pm|xyz)/i.test(src)
   );
 }
 
@@ -197,10 +199,13 @@ function setPlayerContainerForPtt(el: HTMLDivElement | null) {
 /** Known embed provider origins — used for postMessage origin validation */
 const ALLOWED_MESSAGE_ORIGINS = [
   'vidsrc.to', 'vidsrc.pm', 'vidsrc.me', 'vidsrc.cc',
+  'vidsrc.fyi', 'vidsrc.ru',
   'vidsrcme.ru', 'vidsrcme.su', 'vidsrc-embed.ru', 'vidsrc-embed.su',
   'vidsrc-me.ru', 'vidsrc-me.su', 'vsrc.su',
   'vidapi.ru', 'vidapi.domains', 'vaplayer.ru', 'vidapi.to',
   'vidapi.bz', 'vidapi.me', 'vidapi.tw',
+  'vidlink.pro', 'vidninja.pro',
+  'vidfast.pro', 'vidfast.net', 'vidfast.in', 'vidfast.io', 'vidfast.me', 'vidfast.pm', 'vidfast.xyz',
   'embed.su', '2embed.cc', 'www.2embed.cc',
   'multiembed.mov', 'playembed.site',
   'embed.filmu.in', 'filmu.in',
@@ -223,10 +228,15 @@ function isAllowedMessageOrigin(origin: string): boolean {
 function getProviderLabel(url: string): string {
   try {
     const hostname = new URL(url).hostname;
+    if (hostname.includes('vidsrc.fyi')) return 'VidSrc.fyi';
+    if (hostname.includes('vidsrc.ru')) return 'VidSrc.ru';
     if (hostname.includes('vidsrc.to')) return 'VidSrc';
+    if (hostname.includes('vidsrc.cc')) return 'VidSrc.cc';
     if (hostname.includes('embed.su')) return 'EmbedSu';
     if (hostname.includes('vsrc.su') || hostname.includes('vidsrcme') || hostname.includes('vidsrc-embed')) return 'VidSrc.me';
     if (hostname.includes('vidapi') || hostname.includes('vaplayer')) return 'VidAPI';
+    if (hostname.includes('vidlink')) return 'VidLink';
+    if (hostname.includes('vidfast') || hostname.includes('vidninja')) return 'VidFast';
     if (hostname.includes('filmu')) return 'FilmU';
     return hostname.split('.').slice(-2).join('.');
   } catch {

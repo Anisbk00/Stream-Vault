@@ -7,17 +7,34 @@ export const dynamic = 'force-dynamic';
 
 // ─── Provider Config ──────────────────────────────────────────────────────────
 
-/** VidAPI embed domains — primary provider, no Cloudflare protection */
+/** VidAPI embed domains — ad-heavy but reliable, no Cloudflare protection */
 const VIDAPI_EMBED_DOMAINS = [
   'vidapi.ru',
   'vaplayer.ru',
 ] as const;
 
-/** VidSrc.me new active domains — embed fallback */
+/** VidSrc.me active domains — embed fallback */
 const VIDSRC_ME_DOMAINS = [
   'vidsrcme.ru',
   'vidsrcme.su',
   'vsrc.su',
+] as const;
+
+/** Premium embed providers — high quality, less ads, multi-server */
+const VIDSRC_PREMIUM_DOMAINS = [
+  'vidsrc.fyi',
+  'vidsrc.ru',
+] as const;
+
+/** VidLink / VidFast — high-performance embed providers */
+const VIDLINK_DOMAINS = [
+  'vidlink.pro',
+  'vidfast.pro',
+] as const;
+
+/** VidSrc.cc v2 — 1080p with autoplay, uses IMDB IDs */
+const VIDSRC_CC_DOMAINS = [
+  'vidsrc.cc',
 ] as const;
 
 /** Vaplayer streamdata API — returns direct HLS m3u8 URLs */
@@ -67,6 +84,32 @@ function buildVidSrcMeEmbedUrl(
     return `https://${domain}/embed/movie/${id}`;
   }
   return `https://${domain}/embed/tv/${id}/${season}/${episode}`;
+}
+
+function buildVidLinkEmbedUrl(
+  domain: string,
+  type: 'movie' | 'tv',
+  id: string,
+  season: string,
+  episode: string,
+): string {
+  if (type === 'movie') {
+    return `https://${domain}/movie/${id}?autoPlay=true`;
+  }
+  return `https://${domain}/tv/${id}/${season}/${episode}?autoPlay=true`;
+}
+
+function buildVidSrcCcEmbedUrl(
+  domain: string,
+  type: 'movie' | 'tv',
+  id: string,
+  season: string,
+  episode: string,
+): string {
+  if (type === 'movie') {
+    return `https://${domain}/v2/embed/movie/${id}?autoPlay=true`;
+  }
+  return `https://${domain}/v2/embed/tv/${id}/${season}/${episode}?autoPlay=true`;
 }
 
 
@@ -206,37 +249,47 @@ export async function GET(request: NextRequest) {
 
     const mediaType = type as 'movie' | 'tv';
 
-    // Build ALL embed URLs (ordered best → worst: no Cloudflare first, Cloudflare last)
+    // Build ALL embed URLs (ordered best → worst quality)
     // Client cycles through fallbacks automatically if primary fails to load.
     // No server-side HEAD checks — 403 from Cloudflare doesn't mean dead in iframe.
     const allEmbedUrls = [
-      // ── Tier 1: Reliable, no Cloudflare ─────────────────────────
-      // VidAPI domains (primary — no Cloudflare, may have in-player ads)
-      ...VIDAPI_EMBED_DOMAINS.map((domain) =>
-        withQualityHint(buildVidApiEmbedUrl(domain, mediaType, id, season, episode))
+      // ── Tier 1: Premium — high quality, less ads, multi-server ──
+      // VidSrc.fyi / VidSrc.ru (1080p, subtitles, auto-failover)
+      ...VIDSRC_PREMIUM_DOMAINS.map((domain) =>
+        buildVidApiEmbedUrl(domain, mediaType, id, season, episode)
       ),
-      // Embed.su (reliable fallback)
-      withQualityHint(
-        mediaType === 'movie'
-          ? `https://embed.su/embed/movie/${id}`
-          : `https://embed.su/embed/tv/${id}/${season}/${episode}`
+      // VidLink / VidFast (biggest & fastest, premium quality)
+      ...VIDLINK_DOMAINS.map((domain) =>
+        buildVidLinkEmbedUrl(domain, mediaType, id, season, episode)
       ),
+      // VidSrc.cc v2 (1080p, autoplay)
+      ...VIDSRC_CC_DOMAINS.map((domain) =>
+        buildVidSrcCcEmbedUrl(domain, mediaType, id, season, episode)
+      ),
+      // Embed.su (reliable, consistent quality)
+      buildVidApiEmbedUrl('embed.su', mediaType, id, season, episode),
 
-      // ── Tier 2: Good fallbacks ─────────────────────────────────
-      // 2Embed (good coverage for movies not found on other providers)
+      // ── Tier 2: Good fallbacks ──────────────────────────────
+      // 2Embed (good coverage for movies not found on Tier 1)
       withQualityHint(
         mediaType === 'movie'
           ? `https://www.2embed.cc/embed/${id}`
           : `https://www.2embed.cc/embedtv/${id}&s=${season}&e=${episode}`
       ),
 
-      // ── Tier 3: Lower priority ─────────────────────────────────
+      // ── Tier 3: Ad-heavy but reliable ────────────────────────
+      // VidAPI domains (no Cloudflare, but has in-player ads)
+      ...VIDAPI_EMBED_DOMAINS.map((domain) =>
+        withQualityHint(buildVidApiEmbedUrl(domain, mediaType, id, season, episode))
+      ),
+
+      // ── Tier 4: Lower priority ──────────────────────────────
       // VidSrc.me domains
       ...VIDSRC_ME_DOMAINS.map((domain) =>
         withQualityHint(buildVidSrcMeEmbedUrl(domain, mediaType, id, season, episode))
       ),
 
-      // ── Tier 4: Last resort — Cloudflare protected, often blocked in PWA ─
+      // ── Tier 5: Last resort — Cloudflare protected, often blocked ──
       withQualityHint(
         mediaType === 'movie'
           ? `https://vidsrc.to/embed/movie/${id}`
