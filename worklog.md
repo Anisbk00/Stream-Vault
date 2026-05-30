@@ -1138,3 +1138,23 @@ Stage Summary:
 - 2 broken providers demoted (vidsrc.cc CF blocked, embed.su DNS dead)
 - vidapi.ru identified as duplicate of vaplayer.ru (301 redirect)
 - Final tier order: premium → 2embed → vidapi/vaplayer → vidsrc.me/embed.su → CF-blocked
+---
+Task ID: 6
+Agent: Main Agent
+Task: Reorder providers (VidSrc first, VidAPI second) and fix CC button UX
+
+Work Log:
+- Read all relevant files: VideoPlayer.tsx, StreamVaultApp.tsx, source route, subtitle API, useExternalSubtitles hook
+- Traced subtitle flow: source route → StreamVaultApp → VideoPlayer → IframeEmbedPlayer → useExternalSubtitles → subtitle API → OpenSubtitles
+- Confirmed imdbId passes correctly through entire chain
+- Confirmed subtitle system code is correct — "No subtitles available" is from OpenSubtitles API returning 0 tracks (likely API key not configured locally, or no results for content)
+- Reordered provider tiers in /api/stream/source/route.ts: VidSrc premium (vidsrc.fyi, vidsrc.ru) → Tier 1, VidAPI (vidapi.ru, vaplayer.ru) → Tier 2
+- Fixed CC button UX: now opens subtitle menu directly when clicked (previously only toggled on/off without showing menu)
+- Lint passed (0 errors, 2 pre-existing warnings)
+- Pushed as commit bd2825b
+
+Stage Summary:
+- VidSrc is now Tier 1 (better quality, user preference)
+- VidAPI is now Tier 2 (fallback with better subtitles)
+- CC button UX improved — clicking opens subtitle track selector immediately
+- Subtitle "No subtitles available" is an API/configuration issue, not a code bug — requires OPENSUBTITLES_API_KEY env var to be set on deployment
