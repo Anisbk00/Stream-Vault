@@ -1251,3 +1251,28 @@ Stage Summary:
 - Video activity timeout removed — non-postMessage providers will stay loaded
 - 12s load timeout retained for completely dead iframes
 - Subtitle fix (files[0].file_id) from 5d57bf7 included in this build
+---
+Task ID: 11
+Agent: Main Agent
+Task: Fix subtitle parsing — files is at item.attributes.files, not item.files
+
+Work Log:
+- User reported subtitles still not working (Fight Club test)
+- Traced OpenSubtitles API v1 response structure with direct curl:
+  - Top-level keys: ['id', 'type', 'attributes']
+  - 'files' NOT at item top level
+  - 'files' IS at item.attributes.files
+- Previous fix (5d57bf7) used item.files → always undefined → filter always false
+- Root cause: OpenSubtitles API nests files[] inside attributes, not at item root
+- Fixed filter: item.attributes?.files?.length ?? 0 > 0
+- Fixed map: item.attributes.files[0].file_id
+- Verified with simulation: 50 results → 50 after filter → 21 unique languages
+- English available: file_id=11072369, 8518 downloads
+- Lint passed (0 errors after fixing type annotation syntax)
+- Pushed as commit 0ebd846
+
+Stage Summary:
+- CRITICAL FIX: Subtitle parsing now uses correct API response path
+- item.attributes.files (correct) vs item.files (undefined, wrong)
+- Fight Club: 21 subtitle languages confirmed working after fix
+- All previous commits (provider reorder, sandbox removal, activity timeout removal) included
