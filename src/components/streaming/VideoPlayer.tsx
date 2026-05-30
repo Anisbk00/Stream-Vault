@@ -383,16 +383,6 @@ function IframeEmbedPlayer({
   // likely an error/redirect, not a real video embed (those take 3-5s minimum)
   const srcSetTimeRef = useRef(Date.now());
 
-  // ── Dynamic sandbox: auto-detect sandbox-blocking providers ──
-  // Some embed providers (vidapi.ru, vaplayer.ru) detect the sandbox
-  // attribute and refuse to load, showing "Please Disable Sandbox".
-  // Strategy: start with strict sandbox (blocks ad popups/redirects),
-  // detect fast-load failures as likely sandbox refusals, then auto-retry
-  // WITHOUT sandbox. On source change, reset to strict sandbox so
-  // sandbox-compatible providers stay ad-free.
-  const sandboxDisabledRef = useRef(false);
-  const [sandboxRetryKey, setSandboxRetryKey] = useState(0);
-
   // iOS detection — iOS Safari/WKWebView does NOT support requestFullscreen()
   // on <div> elements (only on <video> elements). We use CSS-based fullscreen
   // as a fallback: position:fixed covering the entire viewport.
@@ -483,8 +473,6 @@ function IframeEmbedPlayer({
       setIsTrying(true);
       iframeLoadedRef.current = false;
       srcSetTimeRef.current = Date.now();
-      // Reset sandbox to strict for new source (it might work with sandbox)
-      sandboxDisabledRef.current = false;
 
       // Add a small delay before switching to avoid rapid iframe replacement
       // when multiple sources fail quickly (e.g., Cloudflare blocks)
@@ -531,30 +519,11 @@ function IframeEmbedPlayer({
     }
     // Fast-fail detection: if onLoad fires within 2s of setting the src,
     // the page is likely a network error page (chrome-error://chromewebdata/),
-    // a sandbox refusal page ("Please Disable Sandbox"), a redirect to a
-    // dead page, or a lightweight error — not a real video embed.
-    // Real embed providers take 3-5s minimum to load (player JS, video init).
+    // a content-unavailable page ("This media is not available"), or a
+    // lightweight error — not a real video embed. Real embed providers take
+    // 3-5s minimum to load (player JS, video init).
     const loadDurationMs = Date.now() - srcSetTimeRef.current;
     const isFastLoad = loadDurationMs < 2000;
-
-    // ── Sandbox auto-detection ──
-    // Fast load (<2s) with strict sandbox active and no PLAYER_EVENT yet
-    // → likely a sandbox refusal page. Retry WITHOUT sandbox.
-    // Only attempt once per source (sandboxDisabledRef prevents infinite loop).
-    if (isFastLoad && !sandboxDisabledRef.current) {
-      const sandboxRetryTimeout = setTimeout(() => {
-        // If still no video activity after 3s on a fast-loaded page with sandbox
-        if (!hasReceivedProgressRef.current && !iframePlayingRef.current && !sandboxDisabledRef.current) {
-          sandboxDisabledRef.current = true;
-          setSandboxRetryKey((k) => k + 1);
-          srcSetTimeRef.current = Date.now();
-        }
-      }, 3000);
-      // Store cleanup ref so it can be cancelled if PLAYER_EVENT arrives
-      videoActivityTimeoutRef.current = sandboxRetryTimeout;
-      return;
-    }
-
     const activityTimeout = isFastLoad ? FAST_FAIL_ACTIVITY_TIMEOUT_MS : VIDEO_ACTIVITY_TIMEOUT_MS;
     // Start video activity timer — if no PLAYER_EVENT is received within
     // the timeout, the embed is considered broken.
@@ -1069,11 +1038,10 @@ function IframeEmbedPlayer({
           cookies, and the player's API calls all work correctly.
           This works in both browser and PWA standalone mode. */}
       <iframe
-        key={`${currentSrc}-${sandboxRetryKey}`}
+        key={currentSrc}
         ref={iframeRef}
         src={currentSrc}
         className="absolute inset-0 h-full w-full border-0"
-        sandbox={sandboxDisabledRef.current ? undefined : 'allow-scripts allow-same-origin'}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
         referrerPolicy="origin"
         title={iframeTitle || 'Video Player'}
