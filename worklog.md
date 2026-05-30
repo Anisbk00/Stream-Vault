@@ -1198,3 +1198,29 @@ Stage Summary:
 - VidSrc (vidsrc.fyi, vidsrc.ru) will now load as Tier 1 without sandbox blocking
 - VidAPI (vidapi.ru, vaplayer.ru) popup ads still handled by existing window.open override
 - No regression: popup blocking, source cycling, subtitles, watch party all unaffected
+---
+Task ID: 9
+Agent: Main Agent
+Task: Revert VidAPI to Tier 1, fix VidSrc reload loop + verify subtitles
+
+Work Log:
+- VidSrc.fyi/vidsrc.ru (Tier 1) caused reload loop: embed loads but doesn't send
+  PLAYER_EVENT → video activity timeout (3s for fast load) cycles to next source →
+  eventually exhausts all sources → black screen
+- Root cause: VidSrc premium providers don't send postMessage PLAYER_EVENT,
+  so the player's heartbeat mechanism considers them dead
+- Reverted VidAPI to Tier 1 (only provider that reliably sends PLAYER_EVENT)
+- VidSrc premium moved to Tier 2 (available as fallback)
+- Verified subtitle code chain: source route → StreamVaultApp → VideoPlayer →
+  IframeEmbedPlayer → useExternalSubtitles → subtitle API → OpenSubtitles
+- Subtitle parsing fix (files[0].file_id) from 5d57bf7 is correct — verified
+  with direct API test (827 results for Fight Club)
+- Lint passed (0 errors, 2 pre-existing warnings)
+- Pushed as commit 3f5ae3a
+
+Stage Summary:
+- VidAPI back to Tier 1 (reliable playback, sends PLAYER_EVENT)
+- VidSrc premium at Tier 2 (higher quality but unreliable in iframe)
+- Subtitles will work once Vercel deploys: API key is configured,
+  parsing bug is fixed, code chain verified end-to-end
+- Popup blocker still handles VidAPI ads via window.open override
