@@ -1299,3 +1299,28 @@ Stage Summary:
 - Subtitle errors now properly surfaced to user instead of showing generic "No subtitles available"
 - If subtitle API returns 403/429/etc, the user will see the actual HTTP error message
 - This will help diagnose the persistent "no subtitles available" issue on Vercel
+---
+Task ID: 1
+Agent: Main Agent
+Task: Fix subtitle download failure and investigate player provider issues
+
+Work Log:
+- Read all relevant files: subtitles route, source route, use-external-subtitles hook, VideoPlayer, StreamVaultApp
+- Tested OpenSubtitles download API directly with curl
+- Discovered root cause: file_id sent as STRING returns "missing token" error, file_id as NUMBER returns valid download link
+- Fixed downloadSubtitle() to parseInt fileId before sending to OpenSubtitles API
+- Fixed GET handler routing: moved download action BEFORE tmdbId/imdbId validation (download only needs fileId)
+- Fixed getCorsHeaders().entries() error in Response headers (returns plain object, not Headers instance)
+- Verified subtitle download works locally (curl test returns SRT content for Fight Club)
+- Verified subtitle search still returns 21 languages
+- Investigated player issue: all Tier 1 providers (vidsrc.fyi, vidsrc.ru, vidlink.pro) return HTTP 200 from server-side
+- Source API returns correct URLs in correct tier order
+- No code changes to player in recent commits — issue likely transient provider-side
+- Committed and pushed as 28727e7
+
+Stage Summary:
+- Subtitle download fixed: file_id now sent as number (was string causing API rejection)
+- Subtitle search confirmed working (21 languages for Fight Club via tmdb_id=550)
+- Player providers verified up (HTTP 200) — no code issue found
+- Pushed to git: 28727e7
+
