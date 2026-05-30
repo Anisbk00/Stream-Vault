@@ -362,6 +362,12 @@ function IframeEmbedPlayer({
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const iframeLoadedRef = useRef(false);
+  // Video activity timer — detects broken embeds where iframe HTML loads
+  // but the internal video player never starts (no PLAYER_EVENT received).
+  // Without this, the user is permanently stuck on a dead embed showing
+  // the provider's error message (e.g. vidapi.ru "Network error - all servers failed").
+  const videoActivityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const VIDEO_ACTIVITY_TIMEOUT_MS = 20_000; // 20s after iframe load — if no video activity, try next source
 
   // iOS detection — iOS Safari/WKWebView does NOT support requestFullscreen()
   // on <div> elements (only on <video> elements). We use CSS-based fullscreen
@@ -481,6 +487,7 @@ function IframeEmbedPlayer({
 
     return () => {
       if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+      if (videoActivityTimeoutRef.current) clearTimeout(videoActivityTimeoutRef.current);
     };
   }, [currentSrc, tryNextSource]);
 
@@ -493,7 +500,18 @@ function IframeEmbedPlayer({
       clearTimeout(loadTimeoutRef.current);
       loadTimeoutRef.current = null;
     }
-  }, []);
+    // Start video activity timer — if no PLAYER_EVENT is received within
+    // VIDEO_ACTIVITY_TIMEOUT_MS, the embed is considered broken.
+    // This catches the case where iframe HTML loads fine but the internal
+    // video player fails to initialize (CDN down, content unavailable, etc.)
+    if (videoActivityTimeoutRef.current) clearTimeout(videoActivityTimeoutRef.current);
+    videoActivityTimeoutRef.current = setTimeout(() => {
+      // Only cycle if we haven't received any PLAYER_EVENT yet
+      if (!hasReceivedProgressRef.current && !iframePlayingRef.current) {
+        tryNextSource();
+      }
+    }, VIDEO_ACTIVITY_TIMEOUT_MS);
+  }, [tryNextSource]);
 
   // Listen for PLAYER_EVENT postMessage from iframe
   useEffect(() => {
@@ -512,6 +530,11 @@ function IframeEmbedPlayer({
         if (loadTimeoutRef.current) {
           clearTimeout(loadTimeoutRef.current);
           loadTimeoutRef.current = null;
+        }
+        // Clear video activity timer — embed is confirmed working
+        if (videoActivityTimeoutRef.current) {
+          clearTimeout(videoActivityTimeoutRef.current);
+          videoActivityTimeoutRef.current = null;
         }
 
         if (!data) return;

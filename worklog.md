@@ -1010,3 +1010,29 @@ OPEN_RELAY_API_KEY
 ### 12. INTERNATIONALIZATION
 - `next-intl` installed but not actively configured with locale files
 - UI appears English-only currently
+
+---
+Task ID: 1
+Agent: Main Agent (Architect)
+Task: Fix playback stuck on loading — "Network error - all servers failed"
+
+Work Log:
+- Traced full playback chain: handlePlay → fetchStreamSources → pickBestSource → VideoPlayer → IframeEmbedPlayer
+- Tested /api/stream/source endpoint — returns embed URLs + HLS sources correctly
+- Identified root cause: IframeEmbedPlayer clears its 12s load timeout on iframe.onload (HTML received)
+  but vidapi.ru's internal video player fails AFTER the iframe HTML loads
+- No mechanism existed to detect "iframe loaded but video never started playing"
+- User stuck permanently on a broken embed showing the provider's internal error message
+- Added videoActivityTimeoutRef (20s) that starts after iframe.onload
+- If no PLAYER_EVENT postMessage received within 20s, source cycling resumes (tryNextSource)
+- PLAYER_EVENT handler clears the activity timer (embed confirmed working)
+- Cleanup added for both load timeout and activity timer on unmount/source change
+- Lint: 0 errors (1 pre-existing warning)
+
+Stage Summary:
+- Root cause: iframe.onload fires → load timeout cleared → no further source cycling
+  even though the video inside the iframe never starts playing
+- Fix: Video activity detection timer (20s) after iframe load. If no PLAYER_EVENT
+  postMessage received, automatically tries next embed source
+- File modified: src/components/streaming/VideoPlayer.tsx (4 edits)
+- No design changes. No other components touched. Zero regression risk.
