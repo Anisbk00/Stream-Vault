@@ -25,7 +25,8 @@ async function fetchImdbId(tmdbId: string, type: 'movie' | 'tv'): Promise<string
 // ─── OpenSubtitles: Search ──────────────────────────────────────────────────
 
 async function searchSubtitles(
-  imdbId: string,
+  imdbId?: string,
+  tmdbId?: string,
   season?: number,
   episode?: number,
 ): Promise<{
@@ -39,7 +40,12 @@ async function searchSubtitles(
 
   try {
     const params = new URLSearchParams();
-    params.set('imdb_id', parseInt(imdbId.replace('tt', '')).toString());
+    // Prefer imdb_id when available (most precise), fallback to tmdb_id
+    if (imdbId) {
+      params.set('imdb_id', parseInt(imdbId.replace('tt', '')).toString());
+    } else if (tmdbId) {
+      params.set('tmdb_id', parseInt(tmdbId).toString());
+    }
     if (season !== undefined) params.set('season_number', season.toString());
     if (episode !== undefined) params.set('episode_number', episode.toString());
 
@@ -168,16 +174,20 @@ export async function GET(request: NextRequest) {
       if (!imdbId && tmdbId) {
         imdbId = await fetchImdbId(tmdbId, type);
       }
-      if (!imdbId) {
-        return jsonResponse({ tracks: [], error: 'IMDB ID not found for this content' }, 200);
-      }
 
       let tracks: Awaited<ReturnType<typeof searchSubtitles>> = [];
       try {
-        tracks = await searchSubtitles(imdbId, season, episode);
+        // searchSubtitles supports both imdb_id and tmdb_id — always pass tmdbId
+        // as fallback so subtitles work even when TMDB external_ids lookup fails
+        tracks = await searchSubtitles(imdbId || undefined, tmdbId || undefined, season, episode);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Subtitle search failed';
         return jsonResponse({ tracks: [], error: msg, imdbId }, 200);
+      }
+
+      if (tracks.length === 0 && !imdbId && tmdbId) {
+        // IMDB ID lookup failed but we have TMDB ID — return generic message
+        return jsonResponse({ tracks: [], error: 'No subtitles found (searched by TMDB ID)', imdbId }, 200);
       }
       // Deduplicate by language (keep highest download count per language)
       const seen = new Map<string, (typeof tracks)[0]>();
