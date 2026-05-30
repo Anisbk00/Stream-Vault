@@ -37,9 +37,16 @@ import {
   Mic,
   MicOff,
   Subtitles,
+  Captions,
+  CaptionsOff,
+  Languages,
+  Plus,
+  Minus,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useFullscreen, requestWakeLock, lockOrientation, unlockOrientation } from '@/hooks/use-fullscreen';
+import { useExternalSubtitles } from '@/hooks/use-external-subtitles';
+import { SubtitleOverlay } from '@/components/streaming/SubtitleOverlay';
 
 // ─── Props ───────────────────────────────────────────────────────────────────
 
@@ -115,6 +122,8 @@ interface VideoPlayerProps {
   fmp4Blob?: Blob;
   /** Watch Party sync — when provided, the player syncs playback with the party */
   watchPartySync?: WatchPartySync;
+  /** IMDB ID for this content (used for external subtitle lookup) */
+  imdbId?: string | null;
 }
 
 interface HlsLevel {
@@ -272,6 +281,10 @@ function IframeEmbedPlayer({
   onProgressUpdate,
   onCompleted,
   watchPartySync,
+  imdbId,
+  contentId,
+  season,
+  episode,
 }: {
   src: string;
   fallbackUrls?: string[];
@@ -281,6 +294,10 @@ function IframeEmbedPlayer({
   onProgressUpdate?: (time: number, duration: number) => void;
   onCompleted?: () => void;
   watchPartySync?: WatchPartySync;
+  imdbId?: string | null;
+  contentId?: string | number;
+  season?: number;
+  episode?: number;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -298,6 +315,32 @@ function IframeEmbedPlayer({
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   const [iframeTitle, setIframeTitle] = useState(title || '');
+
+  // ── External subtitle state ────────────────────────────────
+  // Track iframe playback time as state for subtitle sync (ref alone
+  // won't trigger re-renders needed by the subtitle overlay).
+  const [subtitleTime, setSubtitleTime] = useState(0);
+  const [subtitleEnabled, setSubtitleEnabled] = useState(false);
+  const [showSubtitleMenu, setShowSubtitleMenu] = useState(false);
+
+  const {
+    currentCue,
+    tracks: subtitleTracks,
+    selectedTrack,
+    selectTrack: selectSubtitleTrack,
+    clearTrack: clearSubtitleTrack,
+    offset: subtitleOffset,
+    adjustOffset: adjustSubtitleOffset,
+    loading: subtitleLoading,
+    error: subtitleError,
+  } = useExternalSubtitles({
+    contentId: imdbId || contentId || undefined,
+    mediaType,
+    season,
+    episode,
+    currentTime: subtitleTime,
+    enabled: subtitleEnabled,
+  });
 
   // ── Watch Party iframe sync state ────────────────────────
   // Track the iframe's playback position from PLAYER_EVENT postMessages.
@@ -570,6 +613,7 @@ function IframeEmbedPlayer({
         if (data.player_progress !== undefined) {
           const isFirstProgress = !hasReceivedProgressRef.current;
           iframeTimeRef.current = data.player_progress;
+          setSubtitleTime(data.player_progress);
           hasReceivedProgressRef.current = true;
 
           // Capture first progress for watch party correction.
@@ -1051,6 +1095,38 @@ function IframeEmbedPlayer({
         }}
       />
 
+      {/* External subtitle overlay — synced to iframe playback time */}
+      <SubtitleOverlay
+        cue={currentCue}
+        offset={subtitleOffset}
+        loading={subtitleLoading}
+        error={subtitleError}
+      />
+
+      {/* Subtitle controls — bottom-left, always visible when CC is on */}
+      {subtitleEnabled && selectedTrack && (
+        <div className="absolute bottom-3 left-3 z-[116] flex items-center gap-1">
+          {/* Offset adjust */}
+          <button
+            onClick={() => adjustSubtitleOffset(-0.5)}
+            className="flex items-center justify-center h-8 w-8 rounded-md bg-black/60 text-white/80 hover:text-white hover:bg-black/80 transition-colors text-xs"
+            aria-label="Subtitle earlier"
+          >
+            <Minus className="h-3 w-3" />
+          </button>
+          <span className="text-[10px] text-white/70 bg-black/60 px-1.5 py-1 rounded min-w-[48px] text-center font-mono">
+            {subtitleOffset === 0 ? 'Sync' : `${subtitleOffset > 0 ? '+' : ''}${subtitleOffset.toFixed(1)}s`}
+          </span>
+          <button
+            onClick={() => adjustSubtitleOffset(0.5)}
+            className="flex items-center justify-center h-8 w-8 rounded-md bg-black/60 text-white/80 hover:text-white hover:bg-black/80 transition-colors text-xs"
+            aria-label="Subtitle later"
+          >
+            <Plus className="h-3 w-3" />
+          </button>
+        </div>
+      )}
+
       {/* Title + back button overlay — shows on tap, auto-hides after 3s
           on desktop. Stays visible on touch devices. Disappears when overlay
           hides — no interference with embed controls. */}
@@ -1088,6 +1164,89 @@ function IframeEmbedPlayer({
             >
               {isFullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
             </button>
+
+            {/* CC / Subtitle toggle button */}
+            <div className="relative">
+              <button
+                onClick={() => {
+                  if (subtitleEnabled) {
+                    setSubtitleEnabled(false);
+                    setShowSubtitleMenu(false);
+                  } else {
+                    setSubtitleEnabled(true);
+                  }
+                }}
+                className={cn(
+                  'flex items-center justify-center min-h-[44px] min-w-[44px] rounded-lg hover:bg-white/10 -mr-1 transition-colors',
+                  subtitleEnabled ? 'text-yellow-400' : 'text-white/90 hover:text-white',
+                )}
+                aria-label={subtitleEnabled ? 'Disable subtitles' : 'Enable subtitles'}
+              >
+                {subtitleEnabled ? <Captions className="h-5 w-5" /> : <CaptionsOff className="h-5 w-5" />}
+              </button>
+
+              {/* Subtitle language dropdown */}
+              <AnimatePresence>
+                {showSubtitleMenu && subtitleEnabled && (
+                  <>
+                    <div className="fixed inset-0 z-[0]" onClick={() => setShowSubtitleMenu(false)} />
+                    <motion.div
+                      initial={{ opacity: 0, y: -4 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: -4 }}
+                      transition={{ duration: 0.15 }}
+                      className="absolute top-full right-0 mt-1 z-[200] bg-neutral-900/95 backdrop-blur-md border border-white/10 rounded-lg shadow-xl overflow-hidden min-w-[200px]"
+                    >
+                      <div className="p-2">
+                        <p className="text-white/50 text-xs font-medium px-2 py-1">Subtitles</p>
+                        {subtitleLoading && (
+                          <div className="flex items-center gap-2 px-2 py-2 text-white/60 text-xs">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Loading…
+                          </div>
+                        )}
+                        {subtitleError && !subtitleLoading && (
+                          <p className="px-2 py-2 text-red-400 text-xs">{subtitleError}</p>
+                        )}
+                        {!subtitleLoading && subtitleTracks.length === 0 && !subtitleError && (
+                          <p className="px-2 py-2 text-white/40 text-xs">No subtitles available</p>
+                        )}
+                        {subtitleTracks.map((track) => (
+                          <button
+                            key={track.language}
+                            onClick={() => {
+                              selectSubtitleTrack(track);
+                              setShowSubtitleMenu(false);
+                            }}
+                            className={cn(
+                              'w-full flex items-center justify-between px-2 py-2 text-sm rounded-md transition-colors',
+                              selectedTrack?.id === track.id
+                                ? 'bg-white/15 text-white'
+                                : 'text-white/70 hover:bg-white/10 hover:text-white',
+                            )}
+                          >
+                            <span>{track.languageName}</span>
+                            {selectedTrack?.id === track.id && (
+                              <span className="h-1.5 w-1.5 rounded-full bg-yellow-400" />
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
+              {/* Show menu button when CC is on but menu is hidden */}
+              {subtitleEnabled && !showSubtitleMenu && (
+                <button
+                  onClick={() => setShowSubtitleMenu(true)}
+                  className="absolute top-full right-0 mt-0.5 z-[199] flex items-center justify-center min-h-[32px] min-w-[32px] rounded-md bg-black/60 text-white/70 hover:text-white transition-colors"
+                  aria-label="Subtitle settings"
+                >
+                  <Languages className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -3278,6 +3437,10 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       onProgressUpdate={props.onProgressUpdate}
       onCompleted={props.onCompleted}
       watchPartySync={props.watchPartySync}
+      imdbId={props.imdbId}
+      contentId={props.contentId}
+      season={props.season}
+      episode={props.episode}
     />
   ) : (
     <HlsVideoPlayer

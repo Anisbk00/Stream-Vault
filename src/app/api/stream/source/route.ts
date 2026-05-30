@@ -56,6 +56,8 @@ interface SourceResponse {
   providersChecked: number;
   /** Provider that returned each source for UI display */
   providerMap?: Record<string, string>;
+  /** IMDB ID for this content (used for subtitle lookup) */
+  imdbId?: string | null;
 }
 
 // ─── URL Builders ─────────────────────────────────────────────────────────────
@@ -357,6 +359,7 @@ export async function GET(request: NextRequest) {
       sources: dedupedSources,
       providersChecked: totalProviders,
       providerMap,
+      imdbId: imdbId.status === 'fulfilled' ? imdbId.value ?? null : null,
     };
 
     return jsonResponse(response, 200, CACHE.content);

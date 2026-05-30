@@ -463,6 +463,8 @@ export default function StreamVaultApp({ supabaseUrl, supabaseAnonKey }: StreamV
     season?: number;
     episode?: number;
     startTime?: number;
+    /** IMDB ID for this content (used for subtitle lookup) */
+    imdbId?: string | null;
     /** Downloaded subtitle VTT blob URLs, keyed by language */
     subtitleUrls?: Record<string, string>;
     /** Subtitle track metadata for UI display */
@@ -657,6 +659,7 @@ export default function StreamVaultApp({ supabaseUrl, supabaseAnonKey }: StreamV
           : undefined,
         contentId: item.id,
         mediaType,
+        imdbId: sourceData.imdbId || null,
       });
     } catch (err) {
       // If aborted due to newer play request, silently discard
@@ -726,6 +729,7 @@ export default function StreamVaultApp({ supabaseUrl, supabaseAnonKey }: StreamV
           mediaType,
           season,
           episode,
+          imdbId: sourceData.imdbId || null,
         });
       } catch (err) {
         if (controller.signal.aborted) return;
@@ -1484,6 +1488,7 @@ export default function StreamVaultApp({ supabaseUrl, supabaseAnonKey }: StreamV
             mediaType={playerState.mediaType}
             season={playerState.season}
             episode={playerState.episode}
+            imdbId={playerState.imdbId}
             subtitleUrls={playerState.subtitleUrls}
             subtitleTracks={playerState.subtitleTracks}
             useHls={playerState.useHls}

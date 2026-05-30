@@ -93,6 +93,8 @@ export interface StreamSourceResponse {
   downloadLinks?: DownloadLink[];
   /** Maps source URL → provider name */
   providerMap?: Record<string, string>;
+  /** IMDB ID for this content (used for subtitle lookup) */
+  imdbId?: string | null;
 }
 
 // ── Response validation ──────────────────────────────────────────
@@ -266,6 +268,7 @@ export async function fetchStreamSources(
     sources: ensureArray<StreamSource>(data.sources),
     downloadLinks: data.downloadLinks ? ensureArray<DownloadLink>(data.downloadLinks) : undefined,
     providerMap: data.providerMap || undefined,
+    imdbId: data.imdbId || null,
   };
 }
 
