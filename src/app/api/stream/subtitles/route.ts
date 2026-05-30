@@ -102,6 +102,11 @@ async function downloadSubtitle(fileId: string): Promise<string | null> {
   if (!OPENSUBTITLES_API_KEY) return null;
 
   try {
+    // OpenSubtitles download API requires file_id as a NUMBER, not a string.
+    // Sending a string causes "missing token" error instead of returning a link.
+    const numericFileId = parseInt(fileId, 10);
+    if (!numericFileId) return null;
+
     // Step 1: Request download link
     const dlResponse = await fetch(`${OPENSUBTITLES_API}/download`, {
       method: 'POST',
@@ -111,7 +116,7 @@ async function downloadSubtitle(fileId: string): Promise<string | null> {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       },
-      body: JSON.stringify({ file_id: fileId }),
+      body: JSON.stringify({ file_id: numericFileId }),
       signal: AbortSignal.timeout(10000),
     });
 
@@ -146,6 +151,32 @@ export async function GET(request: NextRequest) {
     const tmdbId = request.nextUrl.searchParams.get('tmdbId') || undefined;
     const imdbIdParam = request.nextUrl.searchParams.get('imdbId') || undefined;
 
+    // ── Download action: only needs fileId (no tmdbId/imdbId required) ──
+    if (action === 'download') {
+      const fileId = request.nextUrl.searchParams.get('fileId');
+      if (!fileId) {
+        return errorResponse('Missing "fileId" query parameter', 400);
+      }
+
+      if (!OPENSUBTITLES_API_KEY) {
+        return errorResponse('OpenSubtitles API key not configured', 503);
+      }
+
+      const content = await downloadSubtitle(fileId);
+      if (!content) {
+        return errorResponse('Failed to download subtitle file', 502);
+      }
+
+      return new Response(content, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'public, max-age=86400',
+          ...getCorsHeaders(),
+        },
+      });
+    }
+
+    // ── Search action: requires tmdbId or imdbId ──
     if (!tmdbId && !imdbIdParam) {
       return errorResponse('Missing "tmdbId" or "imdbId" query parameter', 400);
     }
@@ -199,31 +230,6 @@ export async function GET(request: NextRequest) {
       }
       const dedupedTracks = Array.from(seen.values());
       return jsonResponse({ tracks: dedupedTracks, imdbId }, 200);
-    }
-
-    // ── Download action: return subtitle file content ──
-    if (action === 'download') {
-      const fileId = request.nextUrl.searchParams.get('fileId');
-      if (!fileId) {
-        return errorResponse('Missing "fileId" query parameter', 400);
-      }
-
-      if (!OPENSUBTITLES_API_KEY) {
-        return errorResponse('OpenSubtitles API key not configured', 503);
-      }
-
-      const content = await downloadSubtitle(fileId);
-      if (!content) {
-        return errorResponse('Failed to download subtitle file', 502);
-      }
-
-      return new Response(content, {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Cache-Control': 'public, max-age=86400', // 24h — subtitle files rarely change
-          ...Object.fromEntries(getCorsHeaders().entries()),
-        },
-      });
     }
 
     return errorResponse('Missing or invalid "action" parameter — use "search" or "download"', 400);
