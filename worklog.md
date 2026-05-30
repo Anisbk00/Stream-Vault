@@ -868,3 +868,145 @@ Stage Summary:
 - **CRITICAL Issues**: typescript.ignoreBuildErrors:true, reactStrictMode:false, ESLint rules mostly disabled, CSP allows unsafe-inline/eval
 - **ENV Required**: NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY, TMDB_API_KEY, TMDB_READ_ACCESS_TOKEN, FILMU_API_KEY (optional)
 - **Mini-services**: Empty directory (no active services)
+
+---
+Task ID: 0
+Agent: Main Agent (Full Codebase Scan)
+Task: Clone Stream-Vault repo, install, scan entire codebase, produce architecture analysis
+
+Work Log:
+- Cloned repo from GitHub using provided PAT
+- Replaced existing project files completely (preserved Caddyfile from repo)
+- Installed all dependencies (27 new packages: supabase-js, hls.js, mux.js, node-fetch, socket.io-client)
+- Updated .env with required Supabase/TMDB/API variable placeholders
+- Launched 3 parallel Explore agents to scan: streaming components (27 files), lib + API routes (25+ files), types/stores/hooks/config (20+ files)
+- Compiled comprehensive architecture analysis from all agents
+
+Stage Summary:
+- **Project**: StreamVault — Netflix-style premium streaming web app
+- **Stack**: Next.js 16 (App Router) + React 19 + TypeScript + Tailwind CSS 4 + Supabase (Auth/DB/Realtime/Storage) + Zustand + shadcn/ui + HLS.js + mux.js + WebRTC
+- **No Prisma used** — all persistence via Supabase (client SDK + service-role admin)
+- **Lint**: 0 errors, 1 pre-existing warning (unused eslint-disable in VideoPlayer.tsx)
+- **Dev server**: Running on port 3000
+
+## COMPLETE ARCHITECTURE ANALYSIS
+
+### 1. PROJECT OVERVIEW
+StreamVault is a VIP streaming platform with:
+- TMDB-powered content browsing (trending, popular, top-rated, genres, search)
+- Multi-source video streaming (iframe embed + native HLS)
+- Offline download system (HLS→TS→MP4 remux via mux.js, IndexedDB storage)
+- Watch Party with real-time sync (Supabase Realtime Broadcast + Postgres Changes + DB poll)
+- WebRTC voice chat (push-to-talk, iOS voice clip fallback)
+- PWA with service worker, offline support, safe area CSS
+- User profiles, watchlists, admin panel
+- Device session management (max 2 concurrent)
+
+### 2. DATA LAYER (Supabase)
+**Tables**: profiles, watchlist, user_sessions, watch_parties, watch_party_members
+**Auth**: Supabase Auth (email/password), JWT-verified API routes
+**Storage**: avatars bucket (public)
+**Realtime**: Broadcast channels (per-party, per-user invites), Postgres Changes on watch_party tables
+**Migrations**: 7 SQL files (some duplicated: 002_profiles_rls ≈ 003_full_rls_setup, 002_watch_party overlaps 005_watch_parties)
+
+### 3. API ROUTES (24 routes, 35+ endpoints)
+- `/api/config` — Supabase public config (no TMDB key exposure)
+- `/api/users` — Admin user list (service-role bypass RLS)
+- `/api/watch-party` — 13 actions (create, invite, accept, reject, leave, end, pick, start, pause, play, seek, sync, remove-member)
+- `/api/watchlist` — GET/PUT/DELETE (RLS-enforced)
+- `/api/auth/session` — Device session register/heartbeat/evict (max 2)
+- `/api/auth/change-password` — Current password verification required
+- `/api/turn-credentials` — STUN + TURN for WebRTC (no auth ⚠️)
+- `/api/stream/*` — TMDB proxy (15 endpoints: trending, popular, top-rated, genres, search, detail, season, source, embed, proxy, subtitles, catalog)
+- `/api/stream/proxy` — CORS proxy with SSRF protection + domain allowlist
+- `/api/stream/embed` — Ad-free embed proxy with ad stripping
+
+### 4. COMPONENT TREE
+```
+page.tsx (Server Component)
+  → StreamVaultApp.tsx (1511 lines - root controller)
+    → SplashScreen
+    → LoginScreen / ProfileCompletionScreen (auth gates)
+    → Navbar + SearchOverlay
+    → MobileNav
+    → HomePage → HeroSlider + ContentRow[] → ContentCard[]
+    → BrowsePage → GenreChips + ContentCard[] (grid)
+    → DetailPage → CastCarousel + EpisodeList + DownloadButton
+    → VideoPlayer (3250 lines)
+      → IframeEmbedPlayer (with sync)
+      → HlsVideoPlayer (with sync)
+      → WatchPartyPttButton
+    → WatchPartyRoom (floating portal)
+    → WatchPartyInviteOverlay
+    → DownloadsPage → CompletedTaskCard + SeriesGroupCard
+    → WatchlistPage → ContentCard[]
+    → ProfilePage → Avatar Upload + Settings + Admin Users
+    → DownloadPanel (bottom sheet drawer)
+```
+
+### 5. STATE MANAGEMENT (7 Zustand stores)
+- `useNavigationStore` — SPA routing with direction
+- `useWatchlistStore` — Persisted + server sync with retry
+- `useProgressStore` — Persisted, FIFO-capped at 100
+- `useUIStore` — Volatile (search, download panel)
+- `useAuthStore` — Supabase auth + offline cache + avatar blob
+- `useDownloadStore` — Persisted with throttled progress (4 updates/sec)
+- `useSettingsStore` — Subtitle preferences + download folder
+- `useWatchPartyStore` — Party state + playback + voice
+
+### 6. MEDIA ENGINE
+- **HLS.js** for native HLS playback (quality levels, subtitle tracks)
+- **IframeEmbedPlayer** for embed providers (vidapi.ru, vidsrc.to, embed.su, etc.)
+- **MemoryHlsLoader** — Custom HLS.js loader serving from in-memory blobs
+- **fmp4-mse-player** — MSE-based fragmented MP4 playback
+- **ts-to-mp4** — mux.js remuxing with validation
+- **hls-downloader** — Full HLS download pipeline (segment fetch, validate, concatenate)
+- **download-service** — Orchestration with FIFO queue, source probing, auto-save
+
+### 7. WATCH PARTY SYSTEM
+- **Transport**: Supabase Broadcast (WS) → Postgres Changes → DB poll (3-layer)
+- **Voice**: WebRTC mesh (non-iOS) / Voice clip recording (iOS)
+- **Sync**: Dynamic latency compensation, postMessage + URL reload for iframe
+- **Resilience**: Channel recreation on WS death, REST fallback, content-heal (3s)
+- **Complexity**: use-watch-party.ts = 2911 lines
+
+### 8. SECURITY OBSERVATIONS
+| Severity | Issue | Location |
+|----------|-------|----------|
+| 🟡 MEDIUM | No auth on `/api/turn-credentials` + no rate limit | turn-credentials/route.ts |
+| 🟡 MEDIUM | Profile update/upsert lacks caller ownership verification | supabase.ts |
+| 🟡 MEDIUM | No rate limit on `/api/auth/session` | auth/session/route.ts |
+| 🟡 MEDIUM | In-memory rate limiter resets on cold start | rate-limit.ts |
+| 🟡 MEDIUM | `db.ts` still exists with Prisma (unused remnant) | lib/db.ts |
+| 🟢 LOW | `transmux.ts` appears unused (dead code) | lib/transmux.ts |
+| 🟢 LOW | Hardcoded fallback TURN credentials in source | turn-credentials/route.ts |
+
+### 9. CODE QUALITY ISSUES
+- **Oversized files**: StreamVaultApp (1511L), VideoPlayer (3250L), ProfilePage (926L), use-watch-party (2911L)
+- **Duplicate helpers**: `getDisplayTitle`, `getYear`, `getMediaType` in 5+ components
+- **Duplicate constants**: `SUBTITLE_LANGUAGES` in ProfilePage + ProfileCompletionScreen
+- **Duplicate components**: `CompletedTaskCard` in DownloadsPage + DownloadPanel
+- **Dead code**: Unused imports in GenreChips, DownloadButton, Navbar; unused `transmux.ts`
+- **Migration duplication**: 002 ≈ 003 (profiles RLS), 002_watch_party overlaps 005
+
+### 10. ENVIRONMENT VARIABLES REQUIRED
+```
+NEXT_PUBLIC_SUPABASE_URL / SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_ANON_KEY / SUPABASE_ANON_KEY
+SUPABASE_SERVICE_ROLE_KEY
+TMDB_API_KEY / TMDB_READ_ACCESS_TOKEN
+FILMU_API_KEY
+OPENSUBTITLES_API_KEY
+OPEN_RELAY_API_KEY
+```
+
+### 11. PWA / OFFLINE
+- Service worker: `/public/sw.js` with force-update mechanism
+- Manifest: `/public/manifest.json` with PWA metadata
+- Offline page: `/public/offline.html`
+- IndexedDB: Video blobs, subtitles, posters, avatars, directory handles
+- Safe area CSS utilities for iOS notch/home indicator
+
+### 12. INTERNATIONALIZATION
+- `next-intl` installed but not actively configured with locale files
+- UI appears English-only currently
