@@ -1276,3 +1276,26 @@ Stage Summary:
 - item.attributes.files (correct) vs item.files (undefined, wrong)
 - Fight Club: 21 subtitle languages confirmed working after fix
 - All previous commits (provider reorder, sandbox removal, activity timeout removal) included
+---
+Task ID: 1
+Agent: Main Agent
+Task: Move CC+fullscreen to bottom bar + fix subtitle error reporting
+
+Work Log:
+- Moved CC/subtitle toggle and fullscreen buttons from top bar to bottom bar in IframeEmbedPlayer
+- Integrated subtitle offset controls (Sync +/-) into the bottom bar left side
+- Changed subtitle language dropdown to open upward (bottom-full) instead of downward (top-full)
+- Added max-h-60 overflow-y-auto to subtitle dropdown for handling many languages
+- Added break-words to error text display for long API error messages
+- Removed old standalone subtitle offset controls (was at bottom-3 left-3 z-[116])
+- Improved subtitle API error handling: searchSubtitles now throws on HTTP errors instead of silently returning []
+- Search action handler catches errors and returns as { tracks: [], error: msg } with 200 status so UI shows the actual error
+- Verified Tier 1 providers already correct: vidsrc.fyi, vidsrc.ru, vidlink.pro (vidfast.pro already in Tier 3)
+- Lint: 0 errors, 2 pre-existing warnings
+- Pushed as commit 337a5d4
+
+Stage Summary:
+- CC + fullscreen icons moved to bottom bar (better thumb reach on mobile)
+- Subtitle errors now properly surfaced to user instead of showing generic "No subtitles available"
+- If subtitle API returns 403/429/etc, the user will see the actual HTTP error message
+- This will help diagnose the persistent "no subtitles available" issue on Vercel
