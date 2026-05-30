@@ -88,11 +88,10 @@ async function searchSubtitles(
       }))
       .sort((a: { downloadCount: number }, b: { downloadCount: number }) => b.downloadCount - a.downloadCount);
   } catch (err) {
-    // Propagate meaningful errors — caller should surface to user
-    if (err instanceof Error && err.message.startsWith('OpenSubtitles')) {
-      throw err;
-    }
-    return [];
+    // Propagate ALL errors — silent [] return hides failures from the UI.
+    // The caller (GET handler) surfaces errors gracefully to the user.
+    if (err instanceof Error) throw err;
+    throw new Error('Subtitle search failed');
   }
 }
 
@@ -216,9 +215,11 @@ export async function GET(request: NextRequest) {
         return jsonResponse({ tracks: [], error: msg, imdbId }, 200);
       }
 
-      if (tracks.length === 0 && !imdbId && tmdbId) {
-        // IMDB ID lookup failed but we have TMDB ID — return generic message
-        return jsonResponse({ tracks: [], error: 'No subtitles found (searched by TMDB ID)', imdbId }, 200);
+      if (tracks.length === 0) {
+        // Always surface empty results — previous check was gated on !imdbId,
+        // which hid failures when IMDB ID was successfully resolved.
+        const hint = imdbId ? 'searched by IMDB ID' : 'searched by TMDB ID';
+        return jsonResponse({ tracks: [], error: `No subtitles found (${hint})`, imdbId }, 200);
       }
       // Deduplicate by language (keep highest download count per language)
       const seen = new Map<string, (typeof tracks)[0]>();
