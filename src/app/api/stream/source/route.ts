@@ -249,12 +249,19 @@ export async function GET(request: NextRequest) {
 
     const mediaType = type as 'movie' | 'tv';
 
-    // Build ALL embed URLs (ordered best → worst quality)
+    // Build ALL embed URLs (ordered by user preference)
     // Client cycles through fallbacks automatically if primary fails to load.
     // No server-side HEAD checks — 403 from Cloudflare doesn't mean dead in iframe.
     const allEmbedUrls = [
-      // ── Tier 1: Premium — high quality, less ads, multi-server ──
-      // VidSrc.fyi / VidSrc.ru (1080p, subtitles, auto-failover)
+      // ── Tier 1: Best subtitles — reliable, no Cloudflare ──────
+      // VidAPI domains (best subtitle support, reliable uptime)
+      // Note: vidapi.ru 301→vaplayer.ru, so vaplayer is the canonical domain
+      ...VIDAPI_EMBED_DOMAINS.map((domain) =>
+        withQualityHint(buildVidApiEmbedUrl(domain, mediaType, id, season, episode))
+      ),
+
+      // ── Tier 2: Better video quality — 1080p, auto-failover ──
+      // VidSrc.fyi / VidSrc.ru (higher quality streams)
       ...VIDSRC_PREMIUM_DOMAINS.map((domain) =>
         buildVidApiEmbedUrl(domain, mediaType, id, season, episode)
       ),
@@ -263,19 +270,12 @@ export async function GET(request: NextRequest) {
         buildVidLinkEmbedUrl(domain, mediaType, id, season, episode)
       ),
 
-      // ── Tier 2: Good fallbacks ──────────────────────────────
-      // 2Embed (good coverage for movies not found on Tier 1)
+      // ── Tier 3: Good fallbacks ──────────────────────────────
+      // 2Embed (good coverage for movies not found on Tier 1/2)
       withQualityHint(
         mediaType === 'movie'
           ? `https://www.2embed.cc/embed/${id}`
           : `https://www.2embed.cc/embedtv/${id}&s=${season}&e=${episode}`
-      ),
-
-      // ── Tier 3: Ad-heavy but reliable ────────────────────────
-      // VidAPI domains (no Cloudflare, but has in-player ads)
-      // Note: vidapi.ru 301→vaplayer.ru, so vaplayer is the canonical domain
-      ...VIDAPI_EMBED_DOMAINS.map((domain) =>
-        withQualityHint(buildVidApiEmbedUrl(domain, mediaType, id, season, episode))
       ),
 
       // ── Tier 4: Lower priority ──────────────────────────────
