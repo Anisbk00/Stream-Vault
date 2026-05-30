@@ -1065,3 +1065,25 @@ Stage Summary:
 - If HLS fails, existing handleHlsFatalError auto-switches to embed iframe
 - Files changed: StreamVaultApp.tsx (pickBestSource + buildFallbackList)
 - No design changes. No other components touched. Zero regression.
+---
+Task ID: 6
+Agent: Main Agent
+Task: Fix playback not working - all servers failed (Session 2)
+
+Work Log:
+- Analyzed error logs from user: HLS proxy 403 from tmstrd.justhd.tv CDN + iframe CSP/chrome-error failures
+- Traced full playback chain: pickBestSource → HLS proxy → 403 → handleHlsFatalError → iframe embed → chrome-error
+- Identified TWO root causes:
+  1. pickBestSource preferred HLS sources (routed through proxy) over iframe embeds. But CDN blocks Vercel datacenter IPs → proxy always 403s regardless of Referer headers
+  2. iframe sandbox too restrictive + no fast-fail detection for error pages (chrome-error://chromewebdata/)
+- Fixed pickBestSource in StreamVaultApp.tsx: now prefers embed URLs (load directly in browser, no proxy) over HLS sources
+- Fixed buildFallbackList in StreamVaultApp.tsx: embed URLs first, HLS sources last
+- Relaxed iframe sandbox in VideoPlayer.tsx: added allow-forms, allow-popups, allow-popups-to-escape-sandbox, allow-presentation, allow-top-navigation-by-user-activation
+- Added fast-fail detection: if iframe onLoad fires within 2s of src change, use 3s activity timeout instead of 20s (fast loads indicate error pages, not real video embeds)
+- Pushed to git: ff74f23
+
+Stage Summary:
+- Source priority changed: embed iframe primary, HLS proxy fallback
+- Iframe sandbox relaxed with additional permissions
+- Fast-fail detection reduces dead-source cycling from 20s to 3s per broken embed
+- All changes pushed to origin/main
