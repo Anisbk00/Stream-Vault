@@ -174,7 +174,12 @@ function isEmbedUrl(src: string): boolean {
     /vidsrcme\./i.test(src) ||
     /vidsrc-embed\./i.test(src) ||
     /vidsrc-me\./i.test(src) ||
-    /filmu\.in/i.test(src)
+    /filmu\.in/i.test(src) ||
+    /vsembed\.ru/i.test(src) ||
+    /vembed\./i.test(src) ||
+    /autoembed\./i.test(src) ||
+    /cloneembed\./i.test(src) ||
+    /fsapi\.xyz/i.test(src)
   );
 }
 
@@ -206,6 +211,11 @@ const ALLOWED_MESSAGE_ORIGINS = [
   'embed.filmu.in', 'filmu.in',
   // Inner CDN providers used by vidapi.ru / vaplayer.ru
   'nextgencloudfabric.com', 'justhd.tv',
+  // Inner providers used by vidsrcme.ru / vidsrcme.su
+  'vsembed.ru', 'cloudorchestranova.com',
+  // Additional embed CDNs
+  'vembed.net', 'vembed.org', 'autoembed.co', 'autoembed.to',
+  'cloneembed.xyz', 'fsapi.xyz',
 ];
 
 function isAllowedMessageOrigin(origin: string): boolean {
