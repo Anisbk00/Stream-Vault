@@ -373,7 +373,6 @@ function IframeEmbedPlayer({
   // considered broken and we cycle to the next fallback.
   const playbackVerifiedRef = useRef(false);
   const verificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const VERIFICATION_TIMEOUT = 15_000; // 15s — generous for slow mobile/data
 
   // iOS detection — iOS Safari/WKWebView does NOT support requestFullscreen()
   // on <div> elements (only on <video> elements). We use CSS-based fullscreen
@@ -485,16 +484,24 @@ function IframeEmbedPlayer({
     }
   }, [allUrls]);
 
-  // Timeout: if embed doesn't load within 12s, try next source
+  // Timeout: if embed doesn't produce actual playback within 15s, try next source.
+  // This covers TWO failure modes:
+  //   1. iframe never loads at all (network error, DNS failure)
+  //   2. iframe loads but video inside fails (CDN 404, geo-block, broken embed)
+  // The key insight: iframe onload fires even when the inner video fails.
+  // We only clear this timeout when we receive a PLAYER_EVENT with actual
+  // playback data (player_progress or player_status=playing), not just
+  // metadata like player_info/title.
   useEffect(() => {
     if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
 
     loadTimeoutRef.current = setTimeout(() => {
-      // iframe didn't signal it loaded — try next (with delay already built-in)
-      if (!iframeLoadedRef.current) {
+      // No verified playback signal received — cycle to next source
+      if (!playbackVerifiedRef.current) {
+        console.log('[IframeEmbedPlayer] No playback signal within 15s — cycling to next source');
         tryNextSource();
       }
-    }, 12000);
+    }, 15000);
 
     return () => {
       if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
@@ -502,33 +509,13 @@ function IframeEmbedPlayer({
   }, [currentSrc, tryNextSource]);
 
   // Detect iframe load via iframe onload event
-  // IMPORTANT: iframe onload fires even when the inner video content fails
-  // (e.g. embed provider's CDN returns 404). We can't detect this cross-origin,
-  // so we start a verification timer — if no PLAYER_EVENT arrives within
-  // VERIFICATION_TIMEOUT, we cycle to the next fallback source.
+  // We only use this to hide the loading spinner — we do NOT consider
+  // the source "working" just because the iframe HTML loaded.
+  // The 15s playback-verification timeout above handles the real check.
   const handleIframeLoad = useCallback(() => {
-    // iframe HTML loaded — stop the initial load spinner
     iframeLoadedRef.current = true;
     setIsTrying(false);
-    // Clear the initial 12s load timeout (iframe did respond)
-    if (loadTimeoutRef.current) {
-      clearTimeout(loadTimeoutRef.current);
-      loadTimeoutRef.current = null;
-    }
-    // Start verification: wait for actual PLAYER_EVENT from the video player
-    // inside the iframe. If none arrives, the video likely failed to load
-    // (404 from CDN, geo-block, broken embed, etc.) and we should try the
-    // next source instead of showing a broken player to the user.
-    if (verificationTimeoutRef.current) clearTimeout(verificationTimeoutRef.current);
-    if (!playbackVerifiedRef.current) {
-      verificationTimeoutRef.current = setTimeout(() => {
-        if (!playbackVerifiedRef.current) {
-          console.log('[IframeEmbedPlayer] No PLAYER_EVENT received after iframe load — cycling to next source');
-          tryNextSource();
-        }
-      }, VERIFICATION_TIMEOUT);
-    }
-  }, [tryNextSource]);
+  }, []);
 
   // Listen for PLAYER_EVENT postMessage from iframe
   useEffect(() => {
@@ -541,21 +528,34 @@ function IframeEmbedPlayer({
       if (event.data && typeof event.data === 'object' && event.data.type === 'PLAYER_EVENT') {
         const data: PlayerEventData = event.data.data;
 
-        // Clear the load timeout — iframe is actively playing
+        // iframe is communicating — at least the HTML player loaded
         iframeLoadedRef.current = true;
-        playbackVerifiedRef.current = true;
         setIsTrying(false);
-        if (loadTimeoutRef.current) {
-          clearTimeout(loadTimeoutRef.current);
-          loadTimeoutRef.current = null;
-        }
-        // Clear the verification timeout — we got a real playback signal
-        if (verificationTimeoutRef.current) {
-          clearTimeout(verificationTimeoutRef.current);
-          verificationTimeoutRef.current = null;
-        }
 
         if (!data) return;
+
+        // ── Playback verification ──────────────────────────────
+        // Only mark source as "verified" when we receive actual playback
+        // signals (player_progress or player_status=playing). A player_info
+        // event with just the title does NOT mean the video is working —
+        // the embed provider may send metadata before the CDN stream starts,
+        // and the stream can still 404 after that.
+        const isPlaybackEvent =
+          data.player_progress !== undefined ||
+          data.player_status === 'playing';
+
+        if (isPlaybackEvent && !playbackVerifiedRef.current) {
+          playbackVerifiedRef.current = true;
+          // Clear the 15s playback-verification timeout — source is confirmed working
+          if (loadTimeoutRef.current) {
+            clearTimeout(loadTimeoutRef.current);
+            loadTimeoutRef.current = null;
+          }
+          if (verificationTimeoutRef.current) {
+            clearTimeout(verificationTimeoutRef.current);
+            verificationTimeoutRef.current = null;
+          }
+        }
 
         if (data.player_info?.title) {
           setIframeTitle(data.player_info.title);
