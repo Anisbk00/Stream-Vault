@@ -204,6 +204,8 @@ const ALLOWED_MESSAGE_ORIGINS = [
   'embed.su', '2embed.cc', 'www.2embed.cc',
   'multiembed.mov', 'playembed.site',
   'embed.filmu.in', 'filmu.in',
+  // Inner CDN providers used by vidapi.ru / vaplayer.ru
+  'nextgencloudfabric.com', 'justhd.tv',
 ];
 
 function isAllowedMessageOrigin(origin: string): boolean {
@@ -362,6 +364,16 @@ function IframeEmbedPlayer({
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const iframeLoadedRef = useRef(false);
+  // ── Playback verification ────────────────────────────────
+  // The iframe `onload` event fires even when the inner video fails
+  // (e.g. embed provider returns 404 inside their player shell).
+  // We can't detect the failure cross-origin, so we use a secondary
+  // timer: if no PLAYER_EVENT postMessage arrives within
+  // VERIFICATION_TIMEOUT after iframe onload, the source is
+  // considered broken and we cycle to the next fallback.
+  const playbackVerifiedRef = useRef(false);
+  const verificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const VERIFICATION_TIMEOUT = 15_000; // 15s — generous for slow mobile/data
 
   // iOS detection — iOS Safari/WKWebView does NOT support requestFullscreen()
   // on <div> elements (only on <video> elements). We use CSS-based fullscreen
@@ -452,6 +464,11 @@ function IframeEmbedPlayer({
       setHasError(false);
       setIsTrying(true);
       iframeLoadedRef.current = false;
+      playbackVerifiedRef.current = false;
+      if (verificationTimeoutRef.current) {
+        clearTimeout(verificationTimeoutRef.current);
+        verificationTimeoutRef.current = null;
+      }
 
       // Add a small delay before switching to avoid rapid iframe replacement
       // when multiple sources fail quickly (e.g., Cloudflare blocks)
@@ -485,15 +502,33 @@ function IframeEmbedPlayer({
   }, [currentSrc, tryNextSource]);
 
   // Detect iframe load via iframe onload event
+  // IMPORTANT: iframe onload fires even when the inner video content fails
+  // (e.g. embed provider's CDN returns 404). We can't detect this cross-origin,
+  // so we start a verification timer — if no PLAYER_EVENT arrives within
+  // VERIFICATION_TIMEOUT, we cycle to the next fallback source.
   const handleIframeLoad = useCallback(() => {
-    // iframe loaded something — mark as loaded so timeout doesn't cycle
+    // iframe HTML loaded — stop the initial load spinner
     iframeLoadedRef.current = true;
     setIsTrying(false);
+    // Clear the initial 12s load timeout (iframe did respond)
     if (loadTimeoutRef.current) {
       clearTimeout(loadTimeoutRef.current);
       loadTimeoutRef.current = null;
     }
-  }, []);
+    // Start verification: wait for actual PLAYER_EVENT from the video player
+    // inside the iframe. If none arrives, the video likely failed to load
+    // (404 from CDN, geo-block, broken embed, etc.) and we should try the
+    // next source instead of showing a broken player to the user.
+    if (verificationTimeoutRef.current) clearTimeout(verificationTimeoutRef.current);
+    if (!playbackVerifiedRef.current) {
+      verificationTimeoutRef.current = setTimeout(() => {
+        if (!playbackVerifiedRef.current) {
+          console.log('[IframeEmbedPlayer] No PLAYER_EVENT received after iframe load — cycling to next source');
+          tryNextSource();
+        }
+      }, VERIFICATION_TIMEOUT);
+    }
+  }, [tryNextSource]);
 
   // Listen for PLAYER_EVENT postMessage from iframe
   useEffect(() => {
@@ -508,10 +543,16 @@ function IframeEmbedPlayer({
 
         // Clear the load timeout — iframe is actively playing
         iframeLoadedRef.current = true;
+        playbackVerifiedRef.current = true;
         setIsTrying(false);
         if (loadTimeoutRef.current) {
           clearTimeout(loadTimeoutRef.current);
           loadTimeoutRef.current = null;
+        }
+        // Clear the verification timeout — we got a real playback signal
+        if (verificationTimeoutRef.current) {
+          clearTimeout(verificationTimeoutRef.current);
+          verificationTimeoutRef.current = null;
         }
 
         if (!data) return;
@@ -891,6 +932,7 @@ function IframeEmbedPlayer({
     return () => {
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
       if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+      if (verificationTimeoutRef.current) clearTimeout(verificationTimeoutRef.current);
       if (wakeLockRef.current) {
         wakeLockRef.current();
         wakeLockRef.current = null;
@@ -935,6 +977,7 @@ function IframeEmbedPlayer({
                     setHasError(false);
                     setIsTrying(true);
                     iframeLoadedRef.current = false;
+                    playbackVerifiedRef.current = false;
                   }}
                   className="px-5 py-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm font-medium transition-colors cursor-pointer"
                 >

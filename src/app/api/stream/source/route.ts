@@ -20,6 +20,9 @@ const VIDSRC_ME_DOMAINS = [
   'vsrc.su',
 ] as const;
 
+/** VidSrc.cc — uses Cloudflare but works in iframes, good coverage */
+const VIDSRC_CC_BASE = 'https://vidsrc.cc/v2';
+
 /** Vaplayer streamdata API — returns direct HLS m3u8 URLs */
 const STREAM_DATA_API = 'https://streamdata.vaplayer.ru/api.php';
 
@@ -234,6 +237,12 @@ export async function GET(request: NextRequest) {
       // VidSrc.me domains
       ...VIDSRC_ME_DOMAINS.map((domain) =>
         withQualityHint(buildVidSrcMeEmbedUrl(domain, mediaType, id, season, episode))
+      ),
+      // VidSrc.cc (Cloudflare-protected but good coverage)
+      withQualityHint(
+        mediaType === 'movie'
+          ? `${VIDSRC_CC_BASE}/embed/movie/${id}`
+          : `${VIDSRC_CC_BASE}/embed/tv/${id}/${season}/${episode}`
       ),
 
       // ── Tier 4: Last resort — Cloudflare protected, often blocked in PWA ─
