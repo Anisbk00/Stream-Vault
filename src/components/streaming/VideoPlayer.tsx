@@ -371,15 +371,26 @@ function IframeEmbedPlayer({
   );
   const currentIndexRef = useRef(0);
   const [currentSrc, setCurrentSrc] = useState(() => allUrls[0] || '');
-  // Compute provider labels for all URLs — used by server switcher UI
-  const providerLabels = useMemo(
-    () => allUrls.map((url) => getProviderLabel(url)),
-    [allUrls],
-  );
+  // ── Deduplicated provider list for server switcher ────
+  // Group URLs by provider label so the user sees distinct servers
+  // (e.g. VidAPI only once, not twice for vidapi.ru + vaplayer.ru)
+  const uniqueProviders = useMemo(() => {
+    const seen = new Set<string>();
+    const result: { label: string; urlIndex: number }[] = [];
+    allUrls.forEach((url, i) => {
+      const label = getProviderLabel(url);
+      if (!seen.has(label)) {
+        seen.add(label);
+        result.push({ label, urlIndex: i });
+      }
+    });
+    return result;
+  }, [allUrls]);
+
   const [currentLabel, setCurrentLabel] = useState(() => (allUrls[0] ? getProviderLabel(allUrls[0]) : 'Source'));
   const [currentNum, setCurrentNum] = useState(1);
   const [showServerMenu, setShowServerMenu] = useState(false);
-  const totalSources = allUrls.length;
+  const hasMultipleProviders = uniqueProviders.length > 1;
   const [hasError, setHasError] = useState(allUrls.length === 0);
   const [isTrying, setIsTrying] = useState(allUrls.length > 0);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -475,12 +486,15 @@ function IframeEmbedPlayer({
     }
   }, [isIOS]);
 
-  // Switch to a specific source by index — used by server switcher UI
-  const switchToSource = useCallback((index: number) => {
-    if (index < 0 || index >= allUrls.length) return;
-    currentIndexRef.current = index;
-    setCurrentNum(index + 1);
-    setCurrentLabel(providerLabels[index] || 'Source');
+  // Switch to a specific source by URL index — used by server switcher UI
+  const switchToSource = useCallback((urlIndex: number) => {
+    if (urlIndex < 0 || urlIndex >= allUrls.length) return;
+    currentIndexRef.current = urlIndex;
+    const label = getProviderLabel(allUrls[urlIndex]);
+    setCurrentLabel(label || 'Source');
+    // Find the deduplicated provider index for highlighting
+    const providerIdx = uniqueProviders.findIndex((p) => p.urlIndex === urlIndex);
+    setCurrentNum(providerIdx >= 0 ? providerIdx + 1 : 1);
     setHasError(false);
     setIsTrying(true);
     iframeLoadedRef.current = false;
@@ -490,16 +504,18 @@ function IframeEmbedPlayer({
       clearTimeout(verificationTimeoutRef.current);
       verificationTimeoutRef.current = null;
     }
-    setCurrentSrc(allUrls[index]);
-  }, [allUrls, providerLabels]);
+    setCurrentSrc(allUrls[urlIndex]);
+  }, [allUrls, uniqueProviders]);
 
   // Try the next fallback URL (with delay to prevent rapid iframe flashing)
   const tryNextSource = useCallback((immediate = false) => {
     const nextIndex = currentIndexRef.current + 1;
     if (nextIndex < allUrls.length) {
       currentIndexRef.current = nextIndex;
-      setCurrentNum(nextIndex + 1);
-      setCurrentLabel(providerLabels[nextIndex] || 'Source');
+      const label = getProviderLabel(allUrls[nextIndex]);
+      setCurrentLabel(label || 'Source');
+      const providerIdx = uniqueProviders.findIndex((p) => p.urlIndex === nextIndex);
+      setCurrentNum(providerIdx >= 0 ? providerIdx + 1 : 1);
       setHasError(false);
       setIsTrying(true);
       iframeLoadedRef.current = false;
@@ -522,7 +538,7 @@ function IframeEmbedPlayer({
       setHasError(true);
       setIsTrying(false);
     }
-  }, [allUrls, providerLabels]);
+  }, [allUrls, uniqueProviders]);
 
   // Timeout: if embed doesn't produce actual playback within 15s, try next source.
   // This covers TWO failure modes:
@@ -1013,8 +1029,9 @@ function IframeEmbedPlayer({
                     if (allUrls.length === 0) return;
                     currentIndexRef.current = 0;
                     setCurrentSrc(allUrls[0]);
-                    setCurrentLabel(providerLabels[0] || 'Source');
-                    setCurrentNum(1);
+                    setCurrentLabel(getProviderLabel(allUrls[0]) || 'Source');
+                    const providerIdx = uniqueProviders.findIndex((p) => p.urlIndex === 0);
+                    setCurrentNum(providerIdx >= 0 ? providerIdx + 1 : 1);
                     setHasError(false);
                     setIsTrying(true);
                     iframeLoadedRef.current = false;
@@ -1090,109 +1107,109 @@ function IframeEmbedPlayer({
         }}
       />
 
-      {/* Title + back button overlay — shows on tap, auto-hides after 3s
-          on desktop. Stays visible on touch devices. Disappears when overlay
-          hides — no interference with embed controls. */}
+      {/* Title + controls overlay — shows on tap, auto-hides after 3s
+          on desktop. Stays visible on touch devices. */}
       <AnimatePresence>
         {showOverlay && !isTrying && (
           <motion.div
-            className="absolute top-0 left-0 right-0 z-[115] flex items-center justify-between px-4"
-            style={{ paddingTop: 'max(1rem, calc(env(safe-area-inset-top, 0px) + 0.25rem))' }}
+            className="absolute top-0 left-0 right-0 z-[115]"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.25 }}
           >
-            {/* Back button */}
-            <button
-              onClick={onClose}
-              className="flex items-center gap-2 text-white/90 hover:text-white transition-colors min-h-[44px] min-w-[44px] justify-start rounded-lg hover:bg-white/10 -ml-1"
-              aria-label="Go back"
+            {/* Gradient backdrop for readability */}
+            <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/30 to-transparent pointer-events-none" style={{ height: '120px' }} />
+
+            {/* Top bar: back + title + controls */}
+            <div
+              className="relative flex items-center justify-between px-3"
+              style={{ paddingTop: 'max(0.75rem, calc(env(safe-area-inset-top, 0px) + 0.25rem))' }}
             >
-              <ArrowLeft className="h-6 w-6" />
-            </button>
-
-            {/* Title */}
-            {iframeTitle && (
-              <h1 className="text-white text-sm font-medium truncate max-w-[70%] text-center px-4">
-                {iframeTitle}
-              </h1>
-            )}
-
-            {/* Server switcher + Fullscreen */}
-            <div className="flex items-center gap-1 -mr-1">
-              {/* Server switcher pill */}
-              {totalSources > 1 && (
-                <div className="relative">
-                  <button
-                    onClick={() => setShowServerMenu((prev) => !prev)}
-                    className={cn(
-                      'flex items-center gap-1.5 min-h-[36px] px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200',
-                      'bg-white/[0.08] hover:bg-white/[0.14] border border-white/[0.08]',
-                      'text-white/80 hover:text-white active:scale-95',
-                      showServerMenu && 'bg-white/[0.14] border-white/[0.15] text-white',
-                    )}
-                    aria-label="Switch server"
-                  >
-                    <span className="text-[10px] text-white/40 tabular-nums">{currentNum}/{totalSources}</span>
-                    <span className="max-w-[64px] truncate">{currentLabel}</span>
-                    <ChevronDown className={cn(
-                      'h-3 w-3 text-white/40 transition-transform duration-200',
-                      showServerMenu && 'rotate-180',
-                    )} />
-                  </button>
-
-                  {/* Server dropdown */}
-                  <AnimatePresence>
-                    {showServerMenu && (
-                      <motion.div
-                        className="absolute top-full right-0 mt-2 w-44 max-h-[min(320px,60vh)] overflow-y-auto rounded-2xl bg-[#1a1a1a]/95 backdrop-blur-xl border border-white/[0.08] shadow-2xl shadow-black/50 z-[120] py-1.5 scrollbar-thin"
-                        initial={{ opacity: 0, y: -6, scale: 0.96 }}
-                        animate={{ opacity: 1, y: 0, scale: 1 }}
-                        exit={{ opacity: 0, y: -6, scale: 0.96 }}
-                        transition={{ duration: 0.15, ease: [0.32, 0.72, 0, 1] }}
-                      >
-                        {allUrls.map((url, i) => {
-                          const isActive = i === (currentNum - 1);
-                          return (
-                            <button
-                              key={i}
-                              onClick={() => switchToSource(i)}
-                              className={cn(
-                                'w-full flex items-center gap-2.5 px-4 py-2.5 text-left transition-all duration-150',
-                                isActive
-                                  ? 'bg-sv-red/15 text-white'
-                                  : 'text-white/60 hover:text-white hover:bg-white/[0.06]',
-                              )}
-                            >
-                              {/* Active indicator dot */}
-                              <span className={cn(
-                                'w-1.5 h-1.5 rounded-full flex-shrink-0 transition-colors',
-                                isActive ? 'bg-sv-red' : 'bg-white/20',
-                              )} />
-                              <span className="flex-1 text-sm truncate">
-                                {providerLabels[i] || 'Source'}
-                              </span>
-                              <span className="text-[10px] text-white/30 tabular-nums">
-                                {i + 1}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              )}
-
-              {/* Fullscreen button */}
+              {/* Back button */}
               <button
-                onClick={toggleFullscreen}
-                className="flex items-center justify-center min-h-[44px] min-w-[44px] text-white/90 hover:text-white transition-colors rounded-lg hover:bg-white/10"
-                aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                onClick={onClose}
+                className="flex items-center justify-center min-h-[40px] min-w-[40px] text-white/90 hover:text-white transition-colors rounded-full hover:bg-white/10"
+                aria-label="Go back"
               >
-                {isFullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
+                <ArrowLeft className="h-5 w-5" />
               </button>
+
+              {/* Content title — always visible, uses passed title or iframe-reported title */}
+              <h1 className="text-white text-[13px] font-medium truncate max-w-[50%] text-center px-2">
+                {iframeTitle || title || ''}
+              </h1>
+
+              {/* Server switcher + Fullscreen */}
+              <div className="flex items-center gap-1.5">
+                {/* Server switcher — clean pill, only provider name */}
+                {hasMultipleProviders && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowServerMenu((prev) => !prev)}
+                      className={cn(
+                        'flex items-center gap-1.5 h-8 px-3 rounded-full text-[11px] font-semibold tracking-wide transition-all duration-200',
+                        'bg-white/[0.1] hover:bg-white/[0.18] border border-white/[0.06]',
+                        'text-white/90 hover:text-white active:scale-95',
+                        showServerMenu && 'bg-white/[0.18] border-white/[0.12] text-white',
+                      )}
+                      aria-label="Switch server"
+                    >
+                      <span className="truncate max-w-[72px]">{currentLabel}</span>
+                      <ChevronDown className={cn(
+                        'h-3 w-3 text-white/50 transition-transform duration-200 flex-shrink-0',
+                        showServerMenu && 'rotate-180',
+                      )} />
+                    </button>
+
+                    {/* Server dropdown — deduplicated providers only */}
+                    <AnimatePresence>
+                      {showServerMenu && (
+                        <motion.div
+                          className="absolute top-full right-0 mt-2 w-40 rounded-2xl bg-[#1a1a1a]/95 backdrop-blur-xl border border-white/[0.08] shadow-2xl shadow-black/60 z-[120] py-1 overflow-hidden"
+                          initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                          transition={{ duration: 0.15, ease: [0.32, 0.72, 0, 1] }}
+                        >
+                          {uniqueProviders.map((provider, i) => {
+                            const isActive = provider.label === currentLabel;
+                            return (
+                              <button
+                                key={provider.label}
+                                onClick={() => switchToSource(provider.urlIndex)}
+                                className={cn(
+                                  'w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-all duration-150',
+                                  isActive
+                                    ? 'bg-sv-red/20 text-white'
+                                    : 'text-white/50 hover:text-white hover:bg-white/[0.06]',
+                                )}
+                              >
+                                <span className={cn(
+                                  'w-1.5 h-1.5 rounded-full flex-shrink-0 transition-colors',
+                                  isActive ? 'bg-sv-red' : 'bg-white/15',
+                                )} />
+                                <span className="flex-1 text-[13px] font-medium truncate">
+                                  {provider.label}
+                                </span>
+                              </button>
+                            );
+                          })}
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+                )}
+
+                {/* Fullscreen button */}
+                <button
+                  onClick={toggleFullscreen}
+                  className="flex items-center justify-center min-h-[40px] min-w-[40px] text-white/90 hover:text-white transition-colors rounded-full hover:bg-white/10"
+                  aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                >
+                  {isFullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
+                </button>
+              </div>
             </div>
           </motion.div>
         )}
