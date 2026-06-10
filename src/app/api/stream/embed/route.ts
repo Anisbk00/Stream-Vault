@@ -286,12 +286,9 @@ function injectAdBlockers(html: string): string {
 // ─── Allowed embed domains ────────────────────────────────────────────────────
 
 const ALLOWED_HOSTS = [
-  'vidsrc.to', 'vidsrc.pm', 'vidsrc.me', 'vidsrc.cc',
-  'vidsrcme.ru', 'vidsrcme.su', 'vidsrc-embed.ru', 'vidsrc-embed.su',
-  'vidsrc-me.ru', 'vidsrc-me.su', 'vsrc.su',
-  'vidapi.ru', 'vidapi.domains', 'vaplayer.ru', 'vidapi.to',
-  'vidapi.bz', 'vidapi.me', 'vidapi.tw',
-  'embed.su', '2embed.cc', 'www.2embed.cc', 'multiembed.mov', 'playembed.site',
+  // Only working providers
+  'vidapi.ru', 'vaplayer.ru',
+  'embed.su', '2embed.cc', 'www.2embed.cc',
   'vidsrc.link',
 ];
 

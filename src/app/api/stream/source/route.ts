@@ -6,32 +6,16 @@ import type { StreamSource } from '@/types/streaming';
 export const dynamic = 'force-dynamic';
 
 // ─── Provider Config ──────────────────────────────────────────────────────────
+// Only providers that actually work reliably. No Cloudflare-blocked domains.
 
-/** VidAPI embed domains — primary provider, no Cloudflare protection */
-const VIDAPI_EMBED_DOMAINS = [
-  'vidapi.ru',
-  'vaplayer.ru',
-] as const;
+/** VidAPI — primary provider, no Cloudflare protection */
+const VIDAPI_DOMAIN = 'vidapi.ru';
 
-/** VidSrc.me new active domains — embed fallback */
-const VIDSRC_ME_DOMAINS = [
-  'vidsrcme.ru',
-  'vidsrcme.su',
-  'vsrc.su',
-] as const;
-
-/** VidSrc.cc — uses Cloudflare but works in iframes, good coverage */
-const VIDSRC_CC_BASE = 'https://vidsrc.cc/v2';
-
-/** VidSrc.link — no Cloudflare, reliable provider */
+/** VidSrc.link — no Cloudflare, reliable */
 const VIDSRC_LINK_BASE = 'https://vidsrc.link/embed';
 
 /** Vaplayer streamdata API — returns direct HLS m3u8 URLs */
 const STREAM_DATA_API = 'https://streamdata.vaplayer.ru/api.php';
-
-/** FilmU embed — uses IMDB IDs, supports movies & TV shows */
-const FILMU_EMBED_BASE = 'https://embed.filmu.in';
-const FILMU_API_KEY = process.env.FILMU_API_KEY || '';
 
 // ─── Response Types ───────────────────────────────────────────────────────────
 
@@ -49,88 +33,8 @@ interface SourceResponse {
 
 // ─── URL Builders ─────────────────────────────────────────────────────────────
 
-function buildVidApiEmbedUrl(
-  domain: string,
-  type: 'movie' | 'tv',
-  id: string,
-  season: string,
-  episode: string,
-): string {
-  if (type === 'movie') {
-    return `https://${domain}/embed/movie/${id}`;
-  }
-  return `https://${domain}/embed/tv/${id}/${season}/${episode}`;
-}
-
-function buildVidSrcMeEmbedUrl(
-  domain: string,
-  type: 'movie' | 'tv',
-  id: string,
-  season: string,
-  episode: string,
-): string {
-  if (type === 'movie') {
-    return `https://${domain}/embed/movie/${id}`;
-  }
-  return `https://${domain}/embed/tv/${id}/${season}/${episode}`;
-}
-
-
 function withQualityHint(url: string, quality = '1080p'): string {
   return `${url}#quality=${quality}`;
-}
-
-/** Build embed URL using IMDB ID format (last-resort fallback for providers that support it) */
-function buildImdbEmbedUrl(
-  domain: string,
-  type: 'movie' | 'tv',
-  imdbId: string,
-  season: string,
-  episode: string,
-): string {
-  if (type === 'movie') {
-    return `https://${domain}/embed/movie/${imdbId}`;
-  }
-  return `https://${domain}/embed/tv/${imdbId}/${season}/${episode}`;
-}
-
-function buildVidSrcLinkEmbedUrl(
-  type: 'movie' | 'tv',
-  id: string,
-  season: string,
-  episode: string,
-): string {
-  if (type === 'movie') {
-    return `${VIDSRC_LINK_BASE}/movie/${id}`;
-  }
-  return `${VIDSRC_LINK_BASE}/tv/${id}/${season}/${episode}`;
-}
-
-function buildFilmuEmbedUrl(
-  type: 'movie' | 'tv',
-  imdbId: string,
-  season: string,
-  episode: string,
-): string {
-  if (type === 'movie') {
-    return `${FILMU_EMBED_BASE}/movie/${imdbId}?apikey=${FILMU_API_KEY}`;
-  }
-  return `${FILMU_EMBED_BASE}/tv/${imdbId}/${season}/${episode}?apikey=${FILMU_API_KEY}`;
-}
-
-// ─── TMDB IMDB ID Lookup ─────────────────────────────────────────────────────
-
-/** Fetch the IMDB ID for a TMDB movie/show — used for last-resort embed URLs */
-async function fetchImdbId(tmdbId: string, type: 'movie' | 'tv'): Promise<string | null> {
-  try {
-    const path = type === 'movie'
-      ? `/movie/${tmdbId}/external_ids`
-      : `/tv/${tmdbId}/external_ids`;
-    const data = await tmdbFetch<{ imdb_id?: string }>(path);
-    return data?.imdb_id || null;
-  } catch {
-    return null;
-  }
 }
 
 // ─── Vaplayer Stream Data ────────────────────────────────────────────────────
@@ -158,7 +62,7 @@ async function fetchVaplayerSources(
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         Referer: 'https://brightpathsignals.com/',
       },
-      signal: AbortSignal.timeout(8000), // Reduced from 15s — if it doesn't respond quickly, it's not going to
+      signal: AbortSignal.timeout(8000),
     });
 
     if (!response.ok) return sources;
@@ -224,89 +128,48 @@ export async function GET(request: NextRequest) {
 
     const mediaType = type as 'movie' | 'tv';
 
-    // Build ALL embed URLs (ordered best → worst: no Cloudflare first, Cloudflare last)
-    // Client cycles through fallbacks automatically if primary fails to load.
-    // No server-side HEAD checks — 403 from Cloudflare doesn't mean dead in iframe.
+    // Only working providers — no Cloudflare-blocked domains, no dead mirrors
     const allEmbedUrls = [
-      // ── Tier 1: Reliable, no Cloudflare ─────────────────────────
-      // VidAPI domains (primary — no Cloudflare, may have in-player ads)
-      ...VIDAPI_EMBED_DOMAINS.map((domain) =>
-        withQualityHint(buildVidApiEmbedUrl(domain, mediaType, id, season, episode))
+      // VidAPI (primary — no Cloudflare)
+      withQualityHint(
+        mediaType === 'movie'
+          ? `https://${VIDAPI_DOMAIN}/embed/movie/${id}`
+          : `https://${VIDAPI_DOMAIN}/embed/tv/${id}/${season}/${episode}`
       ),
-      // Embed.su (reliable fallback)
+      // Embed.su (reliable, no Cloudflare)
       withQualityHint(
         mediaType === 'movie'
           ? `https://embed.su/embed/movie/${id}`
           : `https://embed.su/embed/tv/${id}/${season}/${episode}`
       ),
-
-      // ── Tier 2: Good fallbacks ─────────────────────────────────
-      // VidSrc.link (reliable, no Cloudflare)
-      withQualityHint(buildVidSrcLinkEmbedUrl(mediaType, id, season, episode)),
-      // 2Embed (good coverage for movies not found on other providers)
+      // VidSrcLink (no Cloudflare, reliable)
+      withQualityHint(
+        mediaType === 'movie'
+          ? `${VIDSRC_LINK_BASE}/movie/${id}`
+          : `${VIDSRC_LINK_BASE}/tv/${id}/${season}/${episode}`
+      ),
+      // 2Embed (good coverage for movies)
       withQualityHint(
         mediaType === 'movie'
           ? `https://www.2embed.cc/embed/${id}`
           : `https://www.2embed.cc/embedtv/${id}&s=${season}&e=${episode}`
-      ),
-
-      // ── Tier 3: Lower priority ─────────────────────────────────
-      // VidSrc.me domains
-      ...VIDSRC_ME_DOMAINS.map((domain) =>
-        withQualityHint(buildVidSrcMeEmbedUrl(domain, mediaType, id, season, episode))
-      ),
-      // VidSrc.cc (Cloudflare-protected but good coverage)
-      withQualityHint(
-        mediaType === 'movie'
-          ? `${VIDSRC_CC_BASE}/embed/movie/${id}`
-          : `${VIDSRC_CC_BASE}/embed/tv/${id}/${season}/${episode}`
-      ),
-
-      // ── Tier 4: Last resort — Cloudflare protected, often blocked in PWA ─
-      withQualityHint(
-        mediaType === 'movie'
-          ? `https://vidsrc.to/embed/movie/${id}`
-          : `https://vidsrc.to/embed/tv/${id}/${season}/${episode}`
       ),
     ];
 
     const embedUrl = allEmbedUrls[0];
     const fallbackUrls = allEmbedUrls.slice(1);
 
-    // Fetch direct HLS sources + IMDB ID concurrently (non-blocking)
-    const [vaplayerSources, imdbId] = await Promise.allSettled([
+    // Fetch direct HLS sources (non-blocking)
+    const vaplayerSources = await Promise.allSettled([
       fetchVaplayerSources(id, mediaType, season, episode),
-      fetchImdbId(id, mediaType),
     ]);
-
-    // IMDB ID based providers — add after TMDB ID providers
-    // These use IMDB IDs (tt1234567) which some providers prefer
-    if (imdbId.status === 'fulfilled' && imdbId.value) {
-      const imdbFallbacks = [
-        // FilmU (IMDB-based, no Cloudflare, ad-free with API key) — skip if key not configured
-        ...(FILMU_API_KEY
-          ? [withQualityHint(buildFilmuEmbedUrl(mediaType, imdbId.value!, season, episode))]
-          : []),
-        // VidAPI with IMDB ID
-        ...VIDAPI_EMBED_DOMAINS.map((domain) =>
-          withQualityHint(buildImdbEmbedUrl(domain, mediaType, imdbId.value!, season, episode))
-        ),
-        // VidSrc.to with IMDB ID
-        withQualityHint(
-          mediaType === 'movie'
-            ? `https://vidsrc.to/embed/movie/${imdbId.value}`
-            : `https://vidsrc.to/embed/tv/${imdbId.value}/${season}/${episode}`
-        ),
-      ];
-      fallbackUrls.push(...imdbFallbacks);
-    }
 
     const sources: StreamSource[] = [];
     const providerMap: Record<string, string> = {};
 
-    if (vaplayerSources.status === 'fulfilled') {
-      sources.push(...vaplayerSources.value);
-      for (const s of vaplayerSources.value) {
+    if (vaplayerSources[0].status === 'fulfilled') {
+      sources.push(...vaplayerSources[0].value);
+      for (const s of vaplayerSources[0].value) {
         if (s.url) providerMap[s.url] = 'vidapi';
       }
     }
@@ -319,14 +182,12 @@ export async function GET(request: NextRequest) {
       return true;
     });
 
-    const totalProviders = allEmbedUrls.length + (imdbId.status === 'fulfilled' && imdbId.value ? 4 : 0);
-
     const response: SourceResponse = {
       embedUrl,
       quality: '1080p',
       fallbackUrls,
       sources: dedupedSources,
-      providersChecked: totalProviders,
+      providersChecked: allEmbedUrls.length,
       providerMap,
     };
 

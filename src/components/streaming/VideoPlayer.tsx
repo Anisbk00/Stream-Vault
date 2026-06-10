@@ -166,21 +166,11 @@ const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 
 function isEmbedUrl(src: string): boolean {
   return (
-    /(?:vaplayer\.ru|vidapi\.)/i.test(src) ||
+    /(?:vaplayer\.ru|vidapi\.ru)/i.test(src) ||
     /\/embed\//i.test(src) ||
-    /vidsrc\./i.test(src) ||
-    /vidsrc\//i.test(src) ||
+    /vidsrc\.link/i.test(src) ||
     /embed\.su/i.test(src) ||
-    /vsrc\.su/i.test(src) ||
-    /vidsrcme\./i.test(src) ||
-    /vidsrc-embed\./i.test(src) ||
-    /vidsrc-me\./i.test(src) ||
-    /filmu\.in/i.test(src) ||
-    /vsembed\.ru/i.test(src) ||
-    /vembed\./i.test(src) ||
-    /autoembed\./i.test(src) ||
-    /cloneembed\./i.test(src) ||
-    /fsapi\.xyz/i.test(src)
+    /2embed\.cc/i.test(src)
   );
 }
 
@@ -202,22 +192,11 @@ function setPlayerContainerForPtt(el: HTMLDivElement | null) {
 
 /** Known embed provider origins — used for postMessage origin validation */
 const ALLOWED_MESSAGE_ORIGINS = [
-  'vidsrc.to', 'vidsrc.pm', 'vidsrc.me', 'vidsrc.cc',
-  'vidsrcme.ru', 'vidsrcme.su', 'vidsrc-embed.ru', 'vidsrc-embed.su',
-  'vidsrc-me.ru', 'vidsrc-me.su', 'vsrc.su',
-  'vidapi.ru', 'vidapi.domains', 'vaplayer.ru', 'vidapi.to',
-  'vidapi.bz', 'vidapi.me', 'vidapi.tw',
+  'vidapi.ru', 'vaplayer.ru',
   'embed.su', '2embed.cc', 'www.2embed.cc',
-  'multiembed.mov', 'playembed.site',
-  'embed.filmu.in', 'filmu.in',
   'vidsrc.link',
   // Inner CDN providers used by vidapi.ru / vaplayer.ru
   'nextgencloudfabric.com', 'justhd.tv',
-  // Inner providers used by vidsrcme.ru / vidsrcme.su
-  'vsembed.ru', 'cloudorchestranova.com',
-  // Additional embed CDNs
-  'vembed.net', 'vembed.org', 'autoembed.co', 'autoembed.to',
-  'cloneembed.xyz', 'fsapi.xyz',
 ];
 
 function isAllowedMessageOrigin(origin: string): boolean {
@@ -237,14 +216,10 @@ function isAllowedMessageOrigin(origin: string): boolean {
 function getProviderLabel(url: string): string {
   try {
     const hostname = new URL(url).hostname;
-    if (hostname.includes('vidsrc.link')) return 'VidSrcLink';
-    if (hostname.includes('vidsrc.to')) return 'VidSrc';
-    if (hostname.includes('embed.su')) return 'EmbedSu';
-    if (hostname.includes('vsrc.su') || hostname.includes('vidsrcme') || hostname.includes('vidsrc-embed')) return 'VidSrc.me';
     if (hostname.includes('vidapi') || hostname.includes('vaplayer')) return 'VidAPI';
+    if (hostname.includes('embed.su')) return 'EmbedSu';
+    if (hostname.includes('vidsrc.link')) return 'VidSrcLink';
     if (hostname.includes('2embed')) return '2Embed';
-    if (hostname.includes('filmu')) return 'FilmU';
-    if (hostname.includes('vidsrc.cc')) return 'VidSrc.cc';
     return hostname.split('.').slice(-2).join('.');
   } catch {
     return 'Source';
