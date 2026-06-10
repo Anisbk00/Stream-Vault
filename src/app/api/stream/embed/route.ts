@@ -292,6 +292,7 @@ const ALLOWED_HOSTS = [
   'vidapi.ru', 'vidapi.domains', 'vaplayer.ru', 'vidapi.to',
   'vidapi.bz', 'vidapi.me', 'vidapi.tw',
   'embed.su', '2embed.cc', 'www.2embed.cc', 'multiembed.mov', 'playembed.site',
+  'vidsrc.link',
 ];
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────

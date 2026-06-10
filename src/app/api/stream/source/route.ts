@@ -23,6 +23,9 @@ const VIDSRC_ME_DOMAINS = [
 /** VidSrc.cc — uses Cloudflare but works in iframes, good coverage */
 const VIDSRC_CC_BASE = 'https://vidsrc.cc/v2';
 
+/** VidSrc.link — no Cloudflare, reliable provider */
+const VIDSRC_LINK_BASE = 'https://vidsrc.link/embed';
+
 /** Vaplayer streamdata API — returns direct HLS m3u8 URLs */
 const STREAM_DATA_API = 'https://streamdata.vaplayer.ru/api.php';
 
@@ -89,6 +92,18 @@ function buildImdbEmbedUrl(
     return `https://${domain}/embed/movie/${imdbId}`;
   }
   return `https://${domain}/embed/tv/${imdbId}/${season}/${episode}`;
+}
+
+function buildVidSrcLinkEmbedUrl(
+  type: 'movie' | 'tv',
+  id: string,
+  season: string,
+  episode: string,
+): string {
+  if (type === 'movie') {
+    return `${VIDSRC_LINK_BASE}/movie/${id}`;
+  }
+  return `${VIDSRC_LINK_BASE}/tv/${id}/${season}/${episode}`;
 }
 
 function buildFilmuEmbedUrl(
@@ -226,6 +241,8 @@ export async function GET(request: NextRequest) {
       ),
 
       // ── Tier 2: Good fallbacks ─────────────────────────────────
+      // VidSrc.link (reliable, no Cloudflare)
+      withQualityHint(buildVidSrcLinkEmbedUrl(mediaType, id, season, episode)),
       // 2Embed (good coverage for movies not found on other providers)
       withQualityHint(
         mediaType === 'movie'

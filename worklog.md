@@ -19,3 +19,37 @@ Stage Summary:
 - Key finding: Sophisticated download pipeline with HLS→MP4 remux, offline playback via IndexedDB
 - Key finding: Watch Party with WebRTC voice, Supabase Realtime sync, PTT voice clips for iOS
 - Key finding: PWA with service worker, offline fallback, device session management (max 2)
+
+---
+Task ID: 2
+Agent: Main Orchestrator
+Task: Add VidSrcLink embedder + premium iOS-style server switcher UI next to fullscreen icon
+
+Work Log:
+- Added VidSrcLink (vidsrc.link) as Tier 2 embedder provider in /api/stream/source/route.ts
+- Added buildVidSrcLinkEmbedUrl function (movie + TV URL formats)
+- Added vidsrc.link to embed proxy ALLOWED_HOSTS in /api/stream/embed/route.ts
+- Updated getProviderLabel in VideoPlayer to recognize vidsrc.link → "VidSrcLink"
+- Updated isEmbedUrl to handle vidsrc.link URLs (already covered by /vidsrc\./ pattern)
+- Added vidsrc.link to ALLOWED_MESSAGE_ORIGINS for postMessage validation
+- Made currentLabel reactive (was static useState, now updates on source switch)
+- Added providerLabels useMemo array for server switcher dropdown
+- Added switchToSource callback for direct source index switching
+- Updated tryNextSource to also update currentLabel on auto-cycle
+- Designed and implemented premium iOS-style server switcher pill UI:
+  - Pill-shaped button showing "1/10 · VidAPI ▾" next to fullscreen icon
+  - Animated dropdown with all available servers, active indicator dot
+  - Glass morphism backdrop-blur, spring animations, rounded-2xl
+  - Click-away dismiss overlay at z-119
+  - Auto-close on overlay hide timer
+  - Hidden when only 1 source available
+- Added click-away dismiss for server menu
+- Updated retry button in error state to reset currentLabel
+- Lint passes (0 errors)
+- API response confirmed: VidSrcLink appears as 4th URL in fallback chain
+
+Stage Summary:
+- VidSrcLink embedder added at Tier 2 (reliable, no Cloudflare)
+- Server switcher UI is production-ready with premium iOS feel
+- All z-index layering verified (no conflicts with Watch Party PTT)
+- Edge cases handled (single source, empty URLs, undefined labels)
