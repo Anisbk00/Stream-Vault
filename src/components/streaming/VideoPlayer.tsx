@@ -27,8 +27,6 @@ import {
   ArrowLeft,
 
   PictureInPicture2,
-  SkipBack,
-  SkipForward,
   Loader2,
   AlertCircle,
   RotateCcw,
@@ -1257,7 +1255,7 @@ function HlsVideoPlayer({
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [showVolumeSlider, setShowVolumeSlider] = useState(false);
-  const [doubleTapOverlay, setDoubleTapOverlay] = useState<'rewind' | 'forward' | null>(null);
+
   const [qualityLevels, setQualityLevels] = useState<HlsLevel[]>([]);
   const [currentQuality, setCurrentQuality] = useState(-1); // -1 = auto
   const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
@@ -1622,12 +1620,9 @@ function HlsVideoPlayer({
 
         if (isLeftSide) {
           seekBy(-10);
-          setDoubleTapOverlay('rewind');
         } else {
           seekBy(10);
-          setDoubleTapOverlay('forward');
         }
-        setTimeout(() => setDoubleTapOverlay(null), 600);
 
         lastTapRef.current = { time: 0, x: 0 };
       } else {
@@ -2616,33 +2611,6 @@ function HlsVideoPlayer({
           localUserId={watchPartySync.localUserId}
         />
       )}
-
-      {/* Double-tap animated overlay */}
-      <AnimatePresence>
-        {doubleTapOverlay && !isMemberLocked && (
-          <motion.div
-            className={cn(
-              'absolute top-1/2 -translate-y-1/2 flex items-center gap-2 pointer-events-none z-[105]',
-              doubleTapOverlay === 'rewind' ? 'left-[15%]' : 'right-[15%]',
-            )}
-            initial={{ opacity: 0, scale: 0.5 }}
-            animate={{ opacity: 1, scale: 1 }}
-            exit={{ opacity: 0, scale: 1.3 }}
-            transition={{ duration: 0.2 }}
-          >
-            <div className="flex items-center justify-center w-16 h-16 md:w-20 md:h-20 rounded-full bg-black/50 backdrop-blur-sm">
-              {doubleTapOverlay === 'rewind' ? (
-                <SkipBack className="h-8 w-8 md:h-10 md:w-10 text-white" />
-              ) : (
-                <SkipForward className="h-8 w-8 md:h-10 md:w-10 text-white" />
-              )}
-            </div>
-            <span className="text-white text-sm md:text-base font-medium bg-black/50 backdrop-blur-sm px-3 py-1.5 rounded-full">
-              {doubleTapOverlay === 'rewind' ? '-10s' : '+10s'}
-            </span>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Controls Overlay */}
       <AnimatePresence>
