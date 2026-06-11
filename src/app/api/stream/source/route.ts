@@ -11,9 +11,6 @@ export const dynamic = 'force-dynamic';
 /** VidAPI — primary provider, no Cloudflare protection */
 const VIDAPI_DOMAIN = 'vidapi.ru';
 
-/** VidSrc.link — no Cloudflare, reliable */
-const VIDSRC_LINK_BASE = 'https://vidsrc.link/embed';
-
 /** Vaplayer streamdata API — returns direct HLS m3u8 URLs */
 const STREAM_DATA_API = 'https://streamdata.vaplayer.ru/api.php';
 
@@ -128,31 +125,13 @@ export async function GET(request: NextRequest) {
 
     const mediaType = type as 'movie' | 'tv';
 
-    // Only working providers — no Cloudflare-blocked domains, no dead mirrors
+    // Only working providers — no dead domains, no Cloudflare-blocked pages
     const allEmbedUrls = [
-      // VidAPI (primary — no Cloudflare)
+      // VidAPI (primary — verified working, no Cloudflare)
       withQualityHint(
         mediaType === 'movie'
           ? `https://${VIDAPI_DOMAIN}/embed/movie/${id}`
           : `https://${VIDAPI_DOMAIN}/embed/tv/${id}/${season}/${episode}`
-      ),
-      // Embed.su (reliable, no Cloudflare)
-      withQualityHint(
-        mediaType === 'movie'
-          ? `https://embed.su/embed/movie/${id}`
-          : `https://embed.su/embed/tv/${id}/${season}/${episode}`
-      ),
-      // VidSrcLink (no Cloudflare, reliable)
-      withQualityHint(
-        mediaType === 'movie'
-          ? `${VIDSRC_LINK_BASE}/movie/${id}`
-          : `${VIDSRC_LINK_BASE}/tv/${id}/${season}/${episode}`
-      ),
-      // 2Embed (good coverage for movies)
-      withQualityHint(
-        mediaType === 'movie'
-          ? `https://www.2embed.cc/embed/${id}`
-          : `https://www.2embed.cc/embedtv/${id}&s=${season}&e=${episode}`
       ),
     ];
 

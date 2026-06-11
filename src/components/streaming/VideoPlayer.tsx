@@ -165,10 +165,7 @@ const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
 function isEmbedUrl(src: string): boolean {
   return (
     /(?:vaplayer\.ru|vidapi\.ru)/i.test(src) ||
-    /\/embed\//i.test(src) ||
-    /vidsrc\.link/i.test(src) ||
-    /embed\.su/i.test(src) ||
-    /2embed\.cc/i.test(src)
+    /\/embed\//i.test(src)
   );
 }
 
@@ -191,8 +188,6 @@ function setPlayerContainerForPtt(el: HTMLDivElement | null) {
 /** Known embed provider origins — used for postMessage origin validation */
 const ALLOWED_MESSAGE_ORIGINS = [
   'vidapi.ru', 'vaplayer.ru',
-  'embed.su', '2embed.cc', 'www.2embed.cc',
-  'vidsrc.link',
   // Inner CDN providers used by vidapi.ru / vaplayer.ru
   'nextgencloudfabric.com', 'justhd.tv',
 ];
@@ -215,9 +210,6 @@ function getProviderLabel(url: string): string {
   try {
     const hostname = new URL(url).hostname;
     if (hostname.includes('vidapi') || hostname.includes('vaplayer')) return 'VidAPI';
-    if (hostname.includes('embed.su')) return 'EmbedSu';
-    if (hostname.includes('vidsrc.link')) return 'VidSrcLink';
-    if (hostname.includes('2embed')) return '2Embed';
     return hostname.split('.').slice(-2).join('.');
   } catch {
     return 'Source';
