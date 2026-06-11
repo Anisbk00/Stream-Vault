@@ -1062,7 +1062,7 @@ function IframeEmbedPlayer({
         ref={iframeRef}
         src={currentSrc}
         className="absolute inset-0 h-full w-full border-0"
-        sandbox="allow-scripts allow-same-origin"
+        sandbox={currentSrc.includes('vidapi.ru') || currentSrc.includes('vaplayer.ru') ? 'allow-scripts allow-same-origin' : undefined}
         allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
         referrerPolicy="origin"
         title={iframeTitle || 'Video Player'}
