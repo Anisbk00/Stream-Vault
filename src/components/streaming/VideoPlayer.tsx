@@ -363,7 +363,6 @@ function IframeEmbedPlayer({
   }, [allUrls]);
 
   const [currentLabel, setCurrentLabel] = useState(() => (allUrls[0] ? getProviderLabel(allUrls[0]) : 'Source'));
-  const [currentNum, setCurrentNum] = useState(1);
   const [showServerMenu, setShowServerMenu] = useState(false);
   const hasMultipleProviders = uniqueProviders.length > 1;
   const [hasError, setHasError] = useState(allUrls.length === 0);
@@ -467,9 +466,6 @@ function IframeEmbedPlayer({
     currentIndexRef.current = urlIndex;
     const label = getProviderLabel(allUrls[urlIndex]);
     setCurrentLabel(label || 'Source');
-    // Find the deduplicated provider index for highlighting
-    const providerIdx = uniqueProviders.findIndex((p) => p.urlIndex === urlIndex);
-    setCurrentNum(providerIdx >= 0 ? providerIdx + 1 : 1);
     setHasError(false);
     setIsTrying(true);
     iframeLoadedRef.current = false;
@@ -480,7 +476,7 @@ function IframeEmbedPlayer({
       verificationTimeoutRef.current = null;
     }
     setCurrentSrc(allUrls[urlIndex]);
-  }, [allUrls, uniqueProviders]);
+  }, [allUrls]);
 
   // Try the next fallback URL (with delay to prevent rapid iframe flashing)
   const tryNextSource = useCallback((immediate = false) => {
@@ -489,8 +485,6 @@ function IframeEmbedPlayer({
       currentIndexRef.current = nextIndex;
       const label = getProviderLabel(allUrls[nextIndex]);
       setCurrentLabel(label || 'Source');
-      const providerIdx = uniqueProviders.findIndex((p) => p.urlIndex === nextIndex);
-      setCurrentNum(providerIdx >= 0 ? providerIdx + 1 : 1);
       setHasError(false);
       setIsTrying(true);
       iframeLoadedRef.current = false;
@@ -513,7 +507,7 @@ function IframeEmbedPlayer({
       setHasError(true);
       setIsTrying(false);
     }
-  }, [allUrls, uniqueProviders]);
+  }, [allUrls]);
 
   // Timeout: if embed doesn't produce actual playback within 15s, try next source.
   // This covers TWO failure modes:
@@ -1005,8 +999,6 @@ function IframeEmbedPlayer({
                     currentIndexRef.current = 0;
                     setCurrentSrc(allUrls[0]);
                     setCurrentLabel(getProviderLabel(allUrls[0]) || 'Source');
-                    const providerIdx = uniqueProviders.findIndex((p) => p.urlIndex === 0);
-                    setCurrentNum(providerIdx >= 0 ? providerIdx + 1 : 1);
                     setHasError(false);
                     setIsTrying(true);
                     iframeLoadedRef.current = false;
@@ -1096,9 +1088,18 @@ function IframeEmbedPlayer({
             {/* Gradient backdrop for readability */}
             <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/30 to-transparent pointer-events-none" style={{ height: '120px' }} />
 
-            {/* Top bar: back + title + controls */}
+            {/* Click-away dismiss for server menu — inside overlay stacking context
+                so dropdown (z-[120]) renders above this (z-[110]) */}
+            {showServerMenu && (
+              <div
+                className="absolute inset-0 z-[110]"
+                onClick={() => setShowServerMenu(false)}
+              />
+            )}
+
+            {/* Top bar: back + controls */}
             <div
-              className="relative flex items-center justify-between px-3"
+              className="relative flex items-center justify-between px-3 z-[111]"
               style={{ paddingTop: 'max(0.75rem, calc(env(safe-area-inset-top, 0px) + 0.25rem))' }}
             >
               {/* Back button */}
@@ -1110,10 +1111,8 @@ function IframeEmbedPlayer({
                 <ArrowLeft className="h-5 w-5" />
               </button>
 
-              {/* Content title — always visible, uses passed title or iframe-reported title */}
-              <h1 className="text-white text-[13px] font-medium truncate max-w-[50%] text-center px-2">
-                {iframeTitle || title || ''}
-              </h1>
+              {/* Spacer — title removed per user request */}
+              <div className="flex-1" />
 
               {/* Server switcher + Fullscreen */}
               <div className="flex items-center gap-1.5">
@@ -1200,13 +1199,7 @@ function IframeEmbedPlayer({
         />
       )}
 
-      {/* Click-away dismiss for server menu */}
-      {showServerMenu && (
-        <div
-          className="absolute inset-0 z-[119]"
-          onClick={() => setShowServerMenu(false)}
-        />
-      )}
+
     </div>
   );
 }
@@ -2674,13 +2667,6 @@ function HlsVideoPlayer({
                   <ArrowLeft className="h-6 w-6" />
                   <span className="text-sm hidden sm:inline">Back</span>
                 </button>
-
-                {/* Title */}
-                {title && (
-                  <h1 className="text-white text-sm md:text-base font-medium truncate max-w-[60%] text-center px-4">
-                    {title}
-                  </h1>
-                )}
 
                 {/* PiP button (top-right) */}
                 <button
