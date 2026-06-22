@@ -29,14 +29,14 @@ export const metadata: Metadata = {
   authors: [{ name: "StreamVault" }],
   icons: {
     icon: [
-      { url: "/favicon-32.png", sizes: "32x32", type: "image/png" },
-      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/sv-favicon.png", sizes: "32x32", type: "image/png" },
+      { url: "/sv-icon-192.png", sizes: "192x192", type: "image/png" },
     ],
     apple: [
-      { url: "/apple-touch-icon.png", sizes: "180x180" },
-      { url: "/apple-touch-icon-120.png", sizes: "120x120" },
-      { url: "/apple-touch-icon-152.png", sizes: "152x152" },
-      { url: "/apple-touch-icon-167.png", sizes: "167x167" },
+      { url: "/sv-touch-180.png", sizes: "180x180" },
+      { url: "/sv-touch-167.png", sizes: "167x167" },
+      { url: "/sv-touch-152.png", sizes: "152x152" },
+      { url: "/sv-touch-120.png", sizes: "120x120" },
     ],
   },
   manifest: "/manifest.json",
@@ -92,16 +92,18 @@ export default function RootLayout({
       <head>
         {/* ── EXPLICIT PWA icon <link> tags ──
             iOS Safari is extremely picky about apple-touch-icon discovery.
-            The Next.js metadata API may not generate all required tags,
-            so we add them explicitly here as a reliable fallback.
-            Cache-bust with ?v=22 to bust iOS Safari's aggressive icon cache. */}
-        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
-        <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
-        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-        <link rel="apple-touch-icon" sizes="167x167" href="/apple-touch-icon-167.png" />
-        <link rel="apple-touch-icon" sizes="152x152" href="/apple-touch-icon-152.png" />
-        <link rel="apple-touch-icon" sizes="120x120" href="/apple-touch-icon-120.png" />
-        <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon.png" />
+            Using NEW filenames (sv-*) because iOS aggressively caches icons
+            by URL — old filenames had broken icons cached for days. */}
+        <link rel="icon" type="image/png" sizes="32x32" href="/sv-favicon.png" />
+        <link rel="icon" type="image/png" sizes="192x192" href="/sv-icon-192.png" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/sv-touch-180.png" />
+        <link rel="apple-touch-icon" sizes="167x167" href="/sv-touch-167.png" />
+        <link rel="apple-touch-icon" sizes="152x152" href="/sv-touch-152.png" />
+        <link rel="apple-touch-icon" sizes="120x120" href="/sv-touch-120.png" />
+        <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/sv-touch-180.png" />
+        {/* CRITICAL: iOS Safari needs this meta tag to recognize PWA.
+            Next.js appleWebApp.capable may not generate it reliably. */}
+        <meta name="apple-mobile-web-app-capable" content="yes" />
         <script
           dangerouslySetInnerHTML={{
             __html: `(function(){
@@ -276,7 +278,7 @@ export default function RootLayout({
               // ── Force-update: runs ONCE when SW version changes ──
               // Nukes all old SW registrations + caches, then reloads.
               // On reload, this script re-runs but the flag is set → skips to registration.
-              var FORCE_FLAG='sv_sw_v23';
+              var FORCE_FLAG='sv_sw_v24';
               if(!localStorage.getItem(FORCE_FLAG)){
                 if(navigator.onLine){
                   navigator.serviceWorker.getRegistrations().then(function(regs){

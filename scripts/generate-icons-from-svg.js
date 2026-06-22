@@ -63,15 +63,20 @@ async function generateIcons() {
   const publicDir = path.join(__dirname, '..', 'public');
 
   const icons = [
-    { size: 512, name: 'icon-512.png', fn: buildShieldSVG },
-    { size: 192, name: 'icon-192.png', fn: buildShieldSVG },
+    // NEW filenames (sv-*) — iOS Safari aggressively caches icons by URL.
+    // Using completely new filenames forces iOS to fetch fresh icons
+    // because it has never cached these URLs before.
+    { size: 512, name: 'sv-icon-512.png', fn: buildShieldSVG },
+    { size: 192, name: 'sv-icon-192.png', fn: buildShieldSVG },
+    { size: 180, name: 'sv-touch-180.png', fn: buildShieldSVG },
+    { size: 167, name: 'sv-touch-167.png', fn: buildShieldSVG },
+    { size: 152, name: 'sv-touch-152.png', fn: buildShieldSVG },
+    { size: 120, name: 'sv-touch-120.png', fn: buildShieldSVG },
+    { size: 32,  name: 'sv-favicon.png', fn: buildShieldSVG },
+    { size: 512, name: 'sv-maskable-512.png', fn: buildMaskableSVG },
+    { size: 192, name: 'sv-maskable-192.png', fn: buildMaskableSVG },
+    // Keep old apple-touch-icon.png for iOS auto-discovery fallback
     { size: 180, name: 'apple-touch-icon.png', fn: buildShieldSVG },
-    { size: 120, name: 'apple-touch-icon-120.png', fn: buildShieldSVG },
-    { size: 152, name: 'apple-touch-icon-152.png', fn: buildShieldSVG },
-    { size: 167, name: 'apple-touch-icon-167.png', fn: buildShieldSVG },
-    { size: 32,  name: 'favicon-32.png', fn: buildShieldSVG },
-    { size: 512, name: 'icon-maskable-512.png', fn: buildMaskableSVG },
-    { size: 192, name: 'icon-maskable-192.png', fn: buildMaskableSVG },
   ];
 
   for (const { size, name, fn } of icons) {
