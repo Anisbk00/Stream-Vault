@@ -108,7 +108,14 @@ const nextConfig: NextConfig = {
         ],
       },
       {
-        source: '/apple-touch-icon(-:size(\\d+))?.png',
+        source: '/apple-touch-icon.png',
+        headers: [
+          { key: 'Content-Type', value: 'image/png' },
+          { key: 'Cache-Control', value: 'public, max-age=300' },
+        ],
+      },
+      {
+        source: '/apple-touch-icon-:size(\\d+).png',
         headers: [
           { key: 'Content-Type', value: 'image/png' },
           { key: 'Cache-Control', value: 'public, max-age=300' },
