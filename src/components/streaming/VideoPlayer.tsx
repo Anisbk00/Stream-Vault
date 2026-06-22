@@ -210,6 +210,7 @@ function getProviderLabel(url: string): string {
   try {
     const hostname = new URL(url).hostname;
     if (hostname.includes('vidapi') || hostname.includes('vaplayer')) return 'VidAPI';
+    if (hostname.includes('embed.su')) return 'Embed.su';
     return hostname.split('.').slice(-2).join('.');
   } catch {
     return 'Source';

@@ -288,6 +288,8 @@ function injectAdBlockers(html: string): string {
 const ALLOWED_HOSTS = [
   // Only working providers
   'vidapi.ru', 'vaplayer.ru',
+  // Embed.su — secondary embed provider
+  'embed.su',
 ];
 
 // ─── Main Handler ─────────────────────────────────────────────────────────────

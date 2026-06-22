@@ -11,6 +11,9 @@ export const dynamic = 'force-dynamic';
 /** VidAPI — primary provider, no Cloudflare protection */
 const VIDAPI_DOMAIN = 'vidapi.ru';
 
+/** Embed.su — secondary embed provider, TMDB-based */
+const EMBED_SU_DOMAIN = 'embed.su';
+
 /** Vaplayer streamdata API — returns direct HLS m3u8 URLs */
 const STREAM_DATA_API = 'https://streamdata.vaplayer.ru/api.php';
 
@@ -132,6 +135,13 @@ export async function GET(request: NextRequest) {
         mediaType === 'movie'
           ? `https://${VIDAPI_DOMAIN}/embed/movie/${id}`
           : `https://${VIDAPI_DOMAIN}/embed/tv/${id}/${season}/${episode}`
+      ),
+      // Embed.su (secondary — TMDB-based, no aggressive CF)
+      withQualityHint(
+        mediaType === 'movie'
+          ? `https://${EMBED_SU_DOMAIN}/embed/movie/${id}`
+          : `https://${EMBED_SU_DOMAIN}/embed/tv/${id}/${season}/${episode}`,
+        '720p'
       ),
     ];
 
