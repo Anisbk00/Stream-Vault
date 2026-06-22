@@ -55,6 +55,12 @@ let _pttHeld = false // tracks whether the user is physically holding PTT — su
 let _clipRecorder: VoiceClipRecorder | null = null // iOS-only: records voice clips during PTT hold
 let _pttStoppedUsers = new Set<string>() // userIds that sent ptt-stop; prevents presence sync from re-activating talking state. Only cleared by ptt-start or party leave.
 let _talkingTimeouts = new Map<string, ReturnType<typeof setTimeout>>() // Safety timeouts for stuck speaking indicators. Cleared when ptt-stop is received.
+
+// ── Mount guard ───────────────────────────────────────────────
+// Prevents stale async callbacks from a previous React mount (StrictMode / HMR)
+// from mutating state after the hook has re-mounted. Every mount increments
+// this counter; callbacks check their captured mountId against the current value.
+let _mountId = 0
 const TALKING_TIMEOUT_MS = 10_000 // 10 seconds — auto-clear stuck speaking indicator if no ptt-stop received
 /**
  * Whether the voice manager has been initialized (mic accessed).
@@ -67,9 +73,9 @@ const TALKING_TIMEOUT_MS = 10_000 // 10 seconds — auto-clear stuck speaking in
 let _voiceReady = false
 let _hostLeftAt: number | null = null // Timestamp when host presence was last seen leaving
 let _hostLeftTimer: ReturnType<typeof setTimeout> | null = null // Timer to auto-end party when host is gone too long
-const HOST_ABSENCE_TIMEOUT_MS = 1_000 // 1 second — presence leave already has ~15-30s heartbeat tolerance
+const HOST_ABSENCE_TIMEOUT_MS = 15_000 // 15 seconds — gives host time to reconnect after brief network hiccup
 let _memberLeftTimers = new Map<string, ReturnType<typeof setTimeout>>() // Per-member absence timers (host-side)
-const MEMBER_ABSENCE_TIMEOUT_MS = 30_000 // 30 seconds before removing absent member
+const MEMBER_ABSENCE_TIMEOUT_MS = 60_000 // 60 seconds — gives members time to reconnect (was 30s, too aggressive)
 
 // ── REST fallback detection ────────────────────────────────
 // When the Supabase WebSocket silently dies, channel.send() falls back to
@@ -1391,7 +1397,7 @@ function subscribePartyChannel(
               _hostLeftAt = null
               return
             }
-            console.log('[WatchParty] Host absent for 1s — auto-ending party for members')
+            console.log('[WatchParty] Host absent for too long — auto-ending party for members')
             toast.info('Host disconnected — watch party ended')
             current.leaveParty()
             unsubscribePartyChannel()
@@ -1427,8 +1433,8 @@ function subscribePartyChannel(
               _memberLeftTimers.delete(absentUserId)
               return
             }
-            // Member absent for 30s after presence leave — remove from party
-            console.log('[WatchParty] Member', absentUserId, 'absent for 30s — removing from party')
+            // Member absent for too long after presence leave — remove from party
+            console.log('[WatchParty] Member', absentUserId, 'absent for too long — removing from party')
             const partyId = _currentPartyId
             // Remove from local member list
             current.setMembers(current.currentParty.members.filter((m) => m.userId !== absentUserId))
@@ -1878,14 +1884,36 @@ export function useWatchParty() {
   const setConnected = useWatchPartyStore((s) => s.setConnected)
   const leavePartyStore = useWatchPartyStore((s) => s.leaveParty)
 
+  // ── Mount guard: increment on mount, tear down on unmount ──
+  // Prevents stale async callbacks from a previous React mount
+  // (StrictMode double-effect, HMR) from mutating state.
+  useEffect(() => {
+    const myMountId = ++_mountId
+    return () => {
+      // On unmount, invalidate this mount's callbacks by incrementing.
+      // If this was the latest mount, also clean up all resources.
+      if (_mountId === myMountId) {
+        unsubscribePartyChannel()
+        unsubscribeInvitesChannel()
+        _restFallbackCount = 0
+        _lastSyncDbWrite = 0
+        _lastSyncSentAt = 0
+      }
+      _mountId++
+    }
+  }, [])
+
   // ── Subscribe to invites channel when authenticated ──────
   useEffect(() => {
     if (status !== 'authenticated' || !user) return
 
+    const mountIdAtSubscribe = _mountId
     subscribeInvitesChannel(user.id)
     setConnected(true)
 
     fetchPendingInvites(user.id).then((invites) => {
+      // Guard: don't update state if hook has re-mounted since we started
+      if (_mountId !== mountIdAtSubscribe) return
       const store = useWatchPartyStore.getState()
       invites.forEach((inv) => store.addInvitation(inv))
     })

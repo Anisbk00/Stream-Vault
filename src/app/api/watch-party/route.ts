@@ -504,6 +504,10 @@ async function handleLeave(userId: string, body: WpRequest) {
     return NextResponse.json({ error: 'Missing or invalid partyId' }, { status: 400 })
   }
 
+  // Verify caller is a member of this party
+  const memberResult = await verifyMembership(userId, partyId)
+  if (memberResult instanceof NextResponse) return memberResult
+
   const { error } = await admin!
     .from('watch_party_members')
     .update({ status: 'left' })

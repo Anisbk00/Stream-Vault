@@ -53,8 +53,10 @@ export interface WpVoiceClipEvent {
  */
 let _audioCtx: AudioContext | null = null
 
-/** Maximum voice clip base64 size (256KB — prevents DoS via oversized clips) */
-const MAX_CLIP_BASE64_SIZE = 256 * 1024
+/** Maximum voice clip base64 size (64KB — stays within Supabase Realtime limits on free tier) */
+const MAX_CLIP_BASE64_SIZE = 64 * 1024
+/** Maximum recording duration in ms (5s — keeps clips small for broadcast transport) */
+const MAX_RECORDING_DURATION_MS = 5_000
 
 /**
  * Initialize or resume the AudioContext. Call this during a user gesture
@@ -157,6 +159,15 @@ export class VoiceClipRecorder {
       this.mediaRecorder.start(100)
       this.startTime = Date.now()
       this._recording = true
+
+      // Auto-stop after max duration to prevent oversized clips
+      // that would exceed Supabase Realtime message size limits
+      this._maxDurationTimer = setTimeout(() => {
+        if (this._recording) {
+          this.stopRecording()
+        }
+      }, MAX_RECORDING_DURATION_MS)
+
       return true
     } catch {
       return false
@@ -178,6 +189,11 @@ export class VoiceClipRecorder {
       const duration = Date.now() - this.startTime
 
       this.mediaRecorder.onstop = () => {
+        // Clear max duration timer (if stop was triggered by user, not auto-stop)
+        if (this._maxDurationTimer) {
+          clearTimeout(this._maxDurationTimer)
+          this._maxDurationTimer = null
+        }
         // Release mic IMMEDIATELY — this returns iOS AVAudioSession to .playback
         this.stream?.getTracks().forEach((t) => t.stop())
         this.stream = null
@@ -204,6 +220,9 @@ export class VoiceClipRecorder {
     })
   }
 
+  /** Max duration timer handle */
+  private _maxDurationTimer: ReturnType<typeof setTimeout> | null = null
+
   /** Force-abort recording without returning data (cleanup on error/disconnect) */
   abort(): void {
     try {
@@ -211,6 +230,10 @@ export class VoiceClipRecorder {
         this.mediaRecorder.stop()
       }
     } catch { /* already stopped */ }
+    if (this._maxDurationTimer) {
+      clearTimeout(this._maxDurationTimer)
+      this._maxDurationTimer = null
+    }
     this.stream?.getTracks().forEach((t) => t.stop())
     this.stream = null
     this.mediaRecorder = null

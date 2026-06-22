@@ -55,6 +55,12 @@ export type WpWebrtcEvent =
 
 // ── Internal peer state ────────────────────────────────────
 
+/** Maximum number of simultaneous WebRTC peer connections.
+ *  Mesh topology scales as N×(N-1)/2 connections total.
+ *  At 8 peers = 28 connections, audio quality degrades and browser
+ *  may struggle. Beyond this, new peers get voice-disabled. */
+const MAX_VOICE_PEERS = 8
+
 interface PeerState {
   pc: RTCPeerConnection
   /** ICE candidates that arrived before the remote description was set */
@@ -415,6 +421,14 @@ export class WebRtcVoiceManager {
     return this.initialized
   }
 
+  /** Current number of active peer connections. */
+  get peerCount(): number {
+    return this.peerConnections.size
+  }
+
+  /** Maximum number of voice peers supported (mesh topology limit). */
+  static readonly MAX_VOICE_PEERS = MAX_VOICE_PEERS
+
   /**
    * Return diagnostic information about all peer connections and local state.
    * Useful for debugging connection issues in production.
@@ -625,6 +639,12 @@ export class WebRtcVoiceManager {
     if (targetUserId === this.userId) return
     if (this.peerConnections.has(targetUserId)) return
 
+    // Enforce voice peer cap — mesh topology doesn't scale past ~8 peers
+    if (this.peerConnections.size >= MAX_VOICE_PEERS) {
+      console.warn('[WebRTC] Voice peer limit reached (' + MAX_VOICE_PEERS + '), skipping offer to', targetUserId)
+      return
+    }
+
     const peer = this.createPeerConnection(targetUserId)
 
     try {
@@ -648,6 +668,12 @@ export class WebRtcVoiceManager {
   async handleOffer(fromUserId: string, sdp: string): Promise<void> {
     if (this.destroyed) return
     if (fromUserId === this.userId) return
+
+    // Enforce voice peer cap for incoming offers too
+    if (!this.peerConnections.has(fromUserId) && this.peerConnections.size >= MAX_VOICE_PEERS) {
+      console.warn('[WebRTC] Voice peer limit reached (' + MAX_VOICE_PEERS + '), rejecting offer from', fromUserId)
+      return
+    }
 
     let peer = this.peerConnections.get(fromUserId)
 

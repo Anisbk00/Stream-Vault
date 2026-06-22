@@ -12,6 +12,7 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { getPlayerContainerForPtt } from '@/components/streaming/VideoPlayer'
+import { isIOSDevice } from '@/lib/voice-clip'
 import {
   ChevronRight,
   Crown,
@@ -322,7 +323,7 @@ export default function WatchPartyRoom({
                   .slice(0, 2)
                   .join('')
                   .toUpperCase()
-                const memberStatus = member.memberStatus || (member.isHost ? 'joined' : 'joined')
+                const memberStatus = member.memberStatus || 'joined'
 
                 return (
                   <div
@@ -421,6 +422,14 @@ export default function WatchPartyRoom({
             )}
             {voiceError && (
               <p className="text-[9px] text-red-400 text-center mt-0.5">{voiceError}</p>
+            )}
+            {/* iOS audio ducking notice */}
+            {isIOSDevice() && voiceStatus === 'connected' && !isPttPressed && (
+              <p className="text-[8px] text-[#505050] text-center mt-0.5">Audio briefly dips while recording on iOS</p>
+            )}
+            {/* Voice peer limit warning */}
+            {members.length > 8 && voiceStatus === 'connected' && (
+              <p className="text-[8px] text-yellow-500/60 text-center mt-0.5">Voice limited to first 8 members</p>
             )}
           </div>
 

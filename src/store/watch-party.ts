@@ -94,6 +94,8 @@ interface WatchPartyState {
   leaveParty: () => void
   /** End the current party (host only, reset state) */
   endParty: () => void
+  /** Internal: reset all party state */
+  _resetParty: () => void
 }
 
 // ── Store ──────────────────────────────────────────────────
@@ -237,7 +239,7 @@ export const useWatchPartyStore = create<WatchPartyState>((set, get) => ({
 
   setPartyStartTime: (time) => set({ partyStartTime: time }),
 
-  leaveParty: () => {
+  _resetParty: () => {
     set({
       currentParty: null,
       isInParty: false,
@@ -252,18 +254,11 @@ export const useWatchPartyStore = create<WatchPartyState>((set, get) => ({
     })
   },
 
+  leaveParty: () => {
+    get()._resetParty()
+  },
+
   endParty: () => {
-    set({
-      currentParty: null,
-      isInParty: false,
-      isHost: false,
-      pauseNotification: null,
-      isPttActive: false,
-      talkingMembers: new Map(),
-      isRoomVisible: false,
-      voiceStatus: 'idle',
-      voiceError: null,
-      partyStartTime: 0,
-    })
+    get()._resetParty()
   },
 }))

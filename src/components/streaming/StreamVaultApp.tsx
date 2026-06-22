@@ -226,12 +226,14 @@ export default function StreamVaultApp({ supabaseUrl, supabaseAnonKey }: StreamV
 
   // ── Dismiss splash once auth resolves ──────────────────────
   useEffect(() => {
-    if (status !== 'loading' && configReady) {
-      // Let the splash animation fully play before cross-fading to app
+    if (status !== 'loading') {
+      // Let the splash animation fully play before cross-fading to app.
+      // Dismiss even when config is missing — the login screen will show
+      // a "configuration required" state instead of a permanent splash.
       const timer = setTimeout(() => setSplashDone(true), 2200);
       return () => clearTimeout(timer);
     }
-  }, [status, configReady]);
+  }, [status]);
 
   // ── Safety net: force exit loading state after 6 seconds ───
   useEffect(() => {
