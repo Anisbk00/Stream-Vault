@@ -1,4 +1,4 @@
-// StreamVault Service Worker v22
+// StreamVault Service Worker v23
 // ─────────────────────────────────────────────────────────────
 // Strategy:
 //   Install:               PRE-CACHE app shell (/) + all /_next/static/ assets from HTML
@@ -14,7 +14,7 @@
 // (see layout.tsx), not from a React component. This ensures the SW
 // intercepts navigation even when the app JS bundles fail to load offline.
 
-const CACHE_NAME = 'streamvault-v19';
+const CACHE_NAME = 'streamvault-v20';
 const OFFLINE_URL = '/offline.html';
 
 // Static assets to always pre-cache (icons, manifest, offline page)

@@ -29,14 +29,14 @@ export const metadata: Metadata = {
   authors: [{ name: "StreamVault" }],
   icons: {
     icon: [
-      { url: "/favicon-32.png?v=22", sizes: "32x32", type: "image/png" },
-      { url: "/icon-192.png?v=22", sizes: "192x192", type: "image/png" },
+      { url: "/favicon-32.png", sizes: "32x32", type: "image/png" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
     ],
     apple: [
-      { url: "/apple-touch-icon.png?v=22", sizes: "180x180" },
-      { url: "/apple-touch-icon-120.png?v=22", sizes: "120x120" },
-      { url: "/apple-touch-icon-152.png?v=22", sizes: "152x152" },
-      { url: "/apple-touch-icon-167.png?v=22", sizes: "167x167" },
+      { url: "/apple-touch-icon.png", sizes: "180x180" },
+      { url: "/apple-touch-icon-120.png", sizes: "120x120" },
+      { url: "/apple-touch-icon-152.png", sizes: "152x152" },
+      { url: "/apple-touch-icon-167.png", sizes: "167x167" },
     ],
   },
   manifest: "/manifest.json",
@@ -95,13 +95,163 @@ export default function RootLayout({
             The Next.js metadata API may not generate all required tags,
             so we add them explicitly here as a reliable fallback.
             Cache-bust with ?v=22 to bust iOS Safari's aggressive icon cache. */}
-        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=22" />
-        <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=22" />
-        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=22" />
-        <link rel="apple-touch-icon" sizes="167x167" href="/apple-touch-icon-167.png?v=22" />
-        <link rel="apple-touch-icon" sizes="152x152" href="/apple-touch-icon-152.png?v=22" />
-        <link rel="apple-touch-icon" sizes="120x120" href="/apple-touch-icon-120.png?v=22" />
-        <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon.png?v=22" />
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+        <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+        <link rel="apple-touch-icon" sizes="167x167" href="/apple-touch-icon-167.png" />
+        <link rel="apple-touch-icon" sizes="152x152" href="/apple-touch-icon-152.png" />
+        <link rel="apple-touch-icon" sizes="120x120" href="/apple-touch-icon-120.png" />
+        <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon.png" />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function(){
+              // ── PWA ICON DIAGNOSTIC ──
+              // Logs everything iOS Safari sees about icons to console.
+              // Check Safari Web Inspector (Develop > [device] > Console) after page load.
+              window.addEventListener('load', function() {
+                setTimeout(function() {
+                  console.group('%c[PWA Icon Diagnostic]', 'color: #E50914; font-weight: bold; font-size: 14px');
+
+                  // 1. Check <link> tags in DOM
+                  var linkTags = document.querySelectorAll('link[rel*="icon"], link[rel*="apple"]');
+                  console.log('%c1. <link> tags found in DOM:', 'font-weight: bold');
+                  linkTags.forEach(function(link) {
+                    console.log('  ', link.rel, link.getAttribute('sizes') || 'no-size', '→', link.href);
+                  });
+                  if (linkTags.length === 0) {
+                    console.error('  ⚠️ NO <link> icon tags found! iOS will NOT find icons.');
+                  }
+
+                  // 2. Check manifest
+                  console.log('%c2. Manifest link:', 'font-weight: bold');
+                  var manifestLink = document.querySelector('link[rel="manifest"]');
+                  if (manifestLink) {
+                    console.log('  ✓ manifest href:', manifestLink.href);
+                  } else {
+                    console.error('  ⚠️ NO <link rel="manifest"> found!');
+                  }
+
+                  // 3. Fetch and validate manifest.json
+                  console.log('%c3. Fetching manifest.json...', 'font-weight: bold');
+                  fetch('/manifest.json', { cache: 'no-store' })
+                    .then(function(r) {
+                      console.log('  Status:', r.status, r.statusText);
+                      console.log('  Content-Type:', r.headers.get('Content-Type'));
+                      return r.text();
+                    })
+                    .then(function(text) {
+                      try {
+                        var m = JSON.parse(text);
+                        console.log('  name:', m.name);
+                        console.log('  short_name:', m.short_name);
+                        console.log('  display:', m.display);
+                        console.log('  start_url:', m.start_url);
+                        console.log('  icons:', JSON.stringify(m.icons, null, 2));
+                        if (!m.icons || m.icons.length === 0) {
+                          console.error('  ⚠️ manifest has NO icons!');
+                        }
+                        // 4. Test each icon URL from manifest
+                        console.log('%c4. Testing manifest icon URLs:', 'font-weight: bold');
+                        (m.icons || []).forEach(function(icon) {
+                          var url = new URL(icon.src, location.origin).href;
+                          var img = new Image();
+                          img.onload = function() {
+                            console.log('  ✓', icon.src, icon.sizes, icon.purpose, '→ loaded', img.naturalWidth + 'x' + img.naturalHeight);
+                          };
+                          img.onerror = function() {
+                            console.error('  ✗', icon.src, icon.sizes, '→ FAILED TO LOAD');
+                          };
+                          img.src = url;
+                          // Also do a fetch to check headers
+                          fetch(url, { method: 'HEAD', cache: 'no-store' })
+                            .then(function(r) {
+                              if (!r.ok) {
+                                console.error('  ✗', icon.src, '→ HTTP', r.status, r.statusText);
+                              } else {
+                                var ct = r.headers.get('Content-Type');
+                                var cl = r.headers.get('Content-Length');
+                                if (ct && ct.indexOf('image/png') === -1) {
+                                  console.error('  ⚠️', icon.src, '→ Wrong Content-Type:', ct, '(expected image/png)');
+                                }
+                                console.log('  HEAD', icon.src, '→', r.status, 'Content-Type:', ct, 'Size:', cl);
+                              }
+                            })
+                            .catch(function(e) {
+                              console.error('  ✗', icon.src, '→ fetch error:', e.message);
+                            });
+                        });
+                      } catch(e) {
+                        console.error('  ⚠️ manifest.json parse error:', e.message);
+                        console.log('  Raw text (first 500 chars):', text.substring(0, 500));
+                      }
+                    })
+                    .catch(function(e) {
+                      console.error('  ⚠️ manifest.json fetch failed:', e.message);
+                    });
+
+                  // 5. Test apple-touch-icon specifically
+                  console.log('%c5. Testing apple-touch-icon.png directly:', 'font-weight: bold');
+                  var testImg = new Image();
+                  testImg.onload = function() {
+                    console.log('  ✓ apple-touch-icon.png loaded:', testImg.naturalWidth + 'x' + testImg.naturalHeight);
+                    // Check for transparency by drawing to canvas
+                    try {
+                      var c = document.createElement('canvas');
+                      c.width = testImg.naturalWidth;
+                      c.height = testImg.naturalHeight;
+                      var ctx = c.getContext('2d');
+                      ctx.drawImage(testImg, 0, 0);
+                      var data = ctx.getImageData(0, 0, c.width, c.height).data;
+                      var transparent = 0;
+                      for (var i = 3; i < data.length; i += 4) {
+                        if (data[i] < 255) transparent++;
+                      }
+                      if (transparent > 0) {
+                        console.error('  ⚠️ apple-touch-icon.png has', transparent, 'transparent pixels! iOS will REJECT this icon.');
+                      } else {
+                        console.log('  ✓ Zero transparent pixels — good');
+                      }
+                    } catch(e) {
+                      console.warn('  Could not check transparency (CORS):', e.message);
+                    }
+                  };
+                  testImg.onerror = function() {
+                    console.error('  ✗ apple-touch-icon.png FAILED TO LOAD');
+                  };
+                  testImg.src = '/apple-touch-icon.png?v=' + Date.now();
+
+                  // 6. Check meta tags
+                  console.log('%c6. Meta tags for PWA:', 'font-weight: bold');
+                  var appleMobile = document.querySelector('meta[name="apple-mobile-web-app-capable"]');
+                  var appleTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+                  console.log('  apple-mobile-web-app-capable:', appleMobile ? appleMobile.content : 'NOT SET');
+                  console.log('  apple-mobile-web-app-title:', appleTitle ? appleTitle.content : 'NOT SET');
+
+                  // 7. Check service worker
+                  console.log('%c7. Service Worker:', 'font-weight: bold');
+                  if ('serviceWorker' in navigator) {
+                    navigator.serviceWorker.getRegistration().then(function(reg) {
+                      if (reg) {
+                        console.log('  ✓ Registered:', reg.scope);
+                        console.log('  Active SW URL:', reg.active ? reg.active.scriptURL : 'none');
+                      } else {
+                        console.error('  ⚠️ No service worker registered');
+                      }
+                    });
+                  }
+
+                  // 8. Check if standalone mode
+                  console.log('%c8. Display mode:', 'font-weight: bold');
+                  console.log('  standalone:', window.matchMedia('(display-mode: standalone)').matches);
+                  console.log('  navigator.standalone:', navigator.standalone);
+
+                  console.groupEnd();
+                }, 2000);
+              });
+            })();
+            `,
+          }}
+        />
         <script
           dangerouslySetInnerHTML={{
             __html: `window.__SV_CONFIG__=${runtimeConfig}`,
@@ -126,7 +276,7 @@ export default function RootLayout({
               // ── Force-update: runs ONCE when SW version changes ──
               // Nukes all old SW registrations + caches, then reloads.
               // On reload, this script re-runs but the flag is set → skips to registration.
-              var FORCE_FLAG='sv_sw_v22';
+              var FORCE_FLAG='sv_sw_v23';
               if(!localStorage.getItem(FORCE_FLAG)){
                 if(navigator.onLine){
                   navigator.serviceWorker.getRegistrations().then(function(regs){
