@@ -1,42 +1,45 @@
 // Generate PWA icons matching the StreamVault splash screen:
 // Red Shield emblem (#E50914) on void black (#080808) background
+//
+// CRITICAL iOS Safari rules:
+//   1. ZERO transparent pixels — iOS treats ANY transparency as "no icon"
+//      and falls back to a screenshot of the page
+//   2. NO rounded corners — iOS applies its own squircle mask
+//   3. Shield must fill most of the canvas — with 15% padding + iOS squircle,
+//      the shield ends up tiny and invisible
+//   4. Must be RGBA (not Indexed/palette) PNG format
+//
 const sharp = require('sharp');
 const path = require('path');
 
 function buildShieldSVG(size) {
-  // Shield icon matching the splash screen's Lucide Shield + red color
-  // FILLED shield for visibility at small home-screen icon sizes
-  const padding = Math.round(size * 0.15);
+  // Shield icon: SOLID black background (no transparency!), large shield
+  // iOS will apply its own squircle mask — we don't need rounded corners
+  const padding = Math.round(size * 0.08); // 8% padding — shield fills ~70% of canvas
   const inner = size - padding * 2;
-  const bgRadius = Math.round(size * 0.22);
 
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="${size}" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#0a0a0a"/>
-      <stop offset="100%" stop-color="#060606"/>
-    </linearGradient>
     <linearGradient id="shieldFill" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
       <stop offset="0%" stop-color="#FF1A25"/>
       <stop offset="100%" stop-color="#C2070F"/>
     </linearGradient>
   </defs>
-  <!-- Void black background with rounded corners -->
-  <rect width="${size}" height="${size}" rx="${bgRadius}" ry="${bgRadius}" fill="url(#bg)"/>
-  <!-- Filled Red Shield emblem — Lucide Shield path, centered -->
+  <!-- SOLID opaque black background — NO rounded corners, NO transparency -->
+  <rect width="${size}" height="${size}" fill="#080808"/>
+  <!-- Filled Red Shield emblem — Lucide Shield path, centered, LARGE -->
   <g transform="translate(${padding}, ${padding}) scale(${inner / 24})">
     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
-          fill="url(#shieldFill)" stroke="#E50914" stroke-width="0.8" stroke-linejoin="round"/>
+          fill="url(#shieldFill)" stroke="#E50914" stroke-width="0.6" stroke-linejoin="round"/>
   </g>
 </svg>`;
 }
 
 function buildMaskableSVG(size) {
-  // Maskable: filled shield with extra safe zone padding
+  // Maskable: same shield but with safe zone padding per Android spec
   const safePad = Math.round(size * 0.10);
   const inner = size - safePad * 2;
-  const bgRadius = Math.round(inner * 0.22);
-  const shieldPad = Math.round(inner * 0.15);
+  const shieldPad = Math.round(inner * 0.08);
   const shieldInner = inner - shieldPad * 2;
 
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
@@ -46,15 +49,12 @@ function buildMaskableSVG(size) {
       <stop offset="100%" stop-color="#C2070F"/>
     </linearGradient>
   </defs>
-  <!-- Solid background for maskable shape -->
+  <!-- SOLID opaque background for maskable shape — NO transparency -->
   <rect width="${size}" height="${size}" fill="#080808"/>
-  <g transform="translate(${safePad}, ${safePad})">
-    <rect width="${inner}" height="${inner}" rx="${bgRadius}" ry="${bgRadius}" fill="#0a0a0a"/>
-    <!-- Filled Shield emblem -->
-    <g transform="translate(${shieldPad}, ${shieldPad}) scale(${shieldInner / 24})">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
-            fill="url(#shieldFill)" stroke="#E50914" stroke-width="0.8" stroke-linejoin="round"/>
-    </g>
+  <!-- Filled Shield emblem with safe zone -->
+  <g transform="translate(${safePad + shieldPad}, ${safePad + shieldPad}) scale(${shieldInner / 24})">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
+          fill="url(#shieldFill)" stroke="#E50914" stroke-width="0.6" stroke-linejoin="round"/>
   </g>
 </svg>`;
 }
@@ -66,6 +66,9 @@ async function generateIcons() {
     { size: 512, name: 'icon-512.png', fn: buildShieldSVG },
     { size: 192, name: 'icon-192.png', fn: buildShieldSVG },
     { size: 180, name: 'apple-touch-icon.png', fn: buildShieldSVG },
+    { size: 120, name: 'apple-touch-icon-120.png', fn: buildShieldSVG },
+    { size: 152, name: 'apple-touch-icon-152.png', fn: buildShieldSVG },
+    { size: 167, name: 'apple-touch-icon-167.png', fn: buildShieldSVG },
     { size: 32,  name: 'favicon-32.png', fn: buildShieldSVG },
     { size: 512, name: 'icon-maskable-512.png', fn: buildMaskableSVG },
     { size: 192, name: 'icon-maskable-192.png', fn: buildMaskableSVG },
@@ -81,12 +84,22 @@ async function generateIcons() {
       // and many Android launchers for home screen icons.
       .png({ quality: 100, compressionLevel: 6, palette: false })
       .toFile(outputPath);
+
+    // Verify: ensure ZERO transparent pixels
+    const buf = await sharp(outputPath).raw().toBuffer({ resolveWithObject: true });
+    const { data, info } = buf;
+    let transparentCount = 0;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) transparentCount++;
+    }
+
     const fs = require('fs');
     const stat = fs.statSync(outputPath);
-    console.log(`✓ ${name} (${size}x${size}, ${stat.size} bytes)`);
+    const status = transparentCount === 0 ? '✓' : `⚠ ${transparentCount} transparent pixels!`;
+    console.log(`${status} ${name} (${size}x${size}, ${stat.size} bytes)`);
   }
 
-  console.log('\nAll PWA icons regenerated — red Shield on black, matching splash screen');
+  console.log('\nAll PWA icons regenerated — filled red Shield on solid black');
 }
 
 generateIcons().catch(err => {

@@ -29,10 +29,15 @@ export const metadata: Metadata = {
   authors: [{ name: "StreamVault" }],
   icons: {
     icon: [
-      { url: "/favicon-32.png", sizes: "32x32", type: "image/png" },
-      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/favicon-32.png?v=22", sizes: "32x32", type: "image/png" },
+      { url: "/icon-192.png?v=22", sizes: "192x192", type: "image/png" },
     ],
-    apple: "/apple-touch-icon.png",
+    apple: [
+      { url: "/apple-touch-icon.png?v=22", sizes: "180x180" },
+      { url: "/apple-touch-icon-120.png?v=22", sizes: "120x120" },
+      { url: "/apple-touch-icon-152.png?v=22", sizes: "152x152" },
+      { url: "/apple-touch-icon-167.png?v=22", sizes: "167x167" },
+    ],
   },
   manifest: "/manifest.json",
   appleWebApp: {
@@ -85,6 +90,18 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning className="dark">
       <head>
+        {/* ── EXPLICIT PWA icon <link> tags ──
+            iOS Safari is extremely picky about apple-touch-icon discovery.
+            The Next.js metadata API may not generate all required tags,
+            so we add them explicitly here as a reliable fallback.
+            Cache-bust with ?v=22 to bust iOS Safari's aggressive icon cache. */}
+        <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=22" />
+        <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png?v=22" />
+        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v=22" />
+        <link rel="apple-touch-icon" sizes="167x167" href="/apple-touch-icon-167.png?v=22" />
+        <link rel="apple-touch-icon" sizes="152x152" href="/apple-touch-icon-152.png?v=22" />
+        <link rel="apple-touch-icon" sizes="120x120" href="/apple-touch-icon-120.png?v=22" />
+        <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon.png?v=22" />
         <script
           dangerouslySetInnerHTML={{
             __html: `window.__SV_CONFIG__=${runtimeConfig}`,
@@ -109,7 +126,7 @@ export default function RootLayout({
               // ── Force-update: runs ONCE when SW version changes ──
               // Nukes all old SW registrations + caches, then reloads.
               // On reload, this script re-runs but the flag is set → skips to registration.
-              var FORCE_FLAG='sv_sw_v21';
+              var FORCE_FLAG='sv_sw_v22';
               if(!localStorage.getItem(FORCE_FLAG)){
                 if(navigator.onLine){
                   navigator.serviceWorker.getRegistrations().then(function(regs){

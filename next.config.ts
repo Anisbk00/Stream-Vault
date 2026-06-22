@@ -85,6 +85,13 @@ const nextConfig: NextConfig = {
         ],
       },
       {
+        source: '/apple-touch-icon-:size(\\d+).png',
+        headers: [
+          { key: 'Content-Type', value: 'image/png' },
+          { key: 'Cache-Control', value: 'public, max-age=604800, immutable' },
+        ],
+      },
+      {
         source: '/favicon-32.png',
         headers: [
           { key: 'Content-Type', value: 'image/png' },
