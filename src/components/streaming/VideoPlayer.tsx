@@ -1665,17 +1665,10 @@ function HlsVideoPlayer({
       } else {
         // Single tap — toggle controls visibility (critical for mobile/PWA
         // where there's no mousemove to bring controls back)
-        setShowControls((prev) => {
-          if (!prev) {
-            // Controls were hidden — show them and restart auto-hide timer
-            resetHideTimer();
-            return true;
-          }
-          // Controls were visible — keep them visible on mobile (tap to hide
-          // is confusing), let auto-hide timer handle it
-          resetHideTimer();
-          return true;
-        });
+        // Always show controls and restart the auto-hide timer.
+        // On mobile, tapping to hide is confusing — let the timer handle it.
+        setShowControls(true);
+        resetHideTimer();
         lastTapRef.current = { time: now, x: clientX };
       }
     },
