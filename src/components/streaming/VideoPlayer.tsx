@@ -1212,7 +1212,11 @@ function HlsVideoPlayer({
   hlsPlaybackId,
   fmp4Blob,
   watchPartySync,
-}: VideoPlayerProps & { onFatalError?: () => void }) {
+  fallbackUrls,
+  contentId,
+  mediaType,
+  onSwitchSource,
+}: VideoPlayerProps & { onFatalError?: () => void; onSwitchSource?: (urlIndex: number, allUrls: string[]) => void }) {
   // Refs
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -1247,6 +1251,7 @@ function HlsVideoPlayer({
   const [showSpeedMenu, setShowSpeedMenu] = useState(false);
   const [showQualityMenu, setShowQualityMenu] = useState(false);
   const [showVolumeSlider, setShowVolumeSlider] = useState(false);
+  const [showServerMenu, setShowServerMenu] = useState(false);
 
   const [qualityLevels, setQualityLevels] = useState<HlsLevel[]>([]);
   const [currentQuality, setCurrentQuality] = useState(-1); // -1 = auto
@@ -1265,6 +1270,45 @@ function HlsVideoPlayer({
 
   // Lock playback controls for non-host members (play/pause, seek)
   const isMemberLocked = !!(watchPartySync && !watchPartySync.isHost);
+
+  // ── Server switcher (shared with IframeEmbedPlayer) ────────────
+  const allUrls = useMemo(
+    () => [src, ...(fallbackUrls || [])]
+      .filter(Boolean)
+      .map((url) => {
+        try {
+          const u = new URL(url, window.location.origin);
+          if (u.origin === window.location.origin) {
+            const realUrl = u.searchParams.get('url');
+            if (realUrl) return realUrl;
+          }
+          return url;
+        } catch { return url; }
+      }),
+    [src, fallbackUrls],
+  );
+  const uniqueProviders = useMemo(() => {
+    const seen = new Map<string, { label: string; urlIndex: number }>();
+    allUrls.forEach((url, i) => {
+      const label = getProviderLabel(url);
+      if (!seen.has(label)) seen.set(label, { label, urlIndex: i });
+    });
+    return Array.from(seen.values());
+  }, [allUrls]);
+  const hasMultipleProviders = uniqueProviders.length > 1;
+  const [currentLabel, setCurrentLabel] = useState(() =>
+    allUrls[0] ? getProviderLabel(allUrls[0]) : 'Source',
+  );
+  const switchToSource = useCallback((urlIndex: number) => {
+    const url = allUrls[urlIndex];
+    if (!url) return;
+    setCurrentLabel(getProviderLabel(url));
+    setShowServerMenu(false);
+    // Delegate source switching to parent — it manages the currentSrc state
+    if (onSwitchSource) {
+      onSwitchSource(urlIndex, allUrls);
+    }
+  }, [allUrls, onSwitchSource]);
 
   // Track previous pausedBy to detect remote pause/play changes
   const prevPausedByRef = useRef<string | null>(null);
@@ -1436,14 +1480,15 @@ function HlsVideoPlayer({
     setShowControls(true);
     if (hideControlsTimerRef.current) clearTimeout(hideControlsTimerRef.current);
     hideControlsTimerRef.current = setTimeout(() => {
-      if (!showSpeedMenu && !showQualityMenu && !showVolumeSlider) {
+      if (!showSpeedMenu && !showQualityMenu && !showVolumeSlider && !showServerMenu) {
         setShowControls(false);
         setShowVolumeSlider(false);
         setShowSpeedMenu(false);
         setShowQualityMenu(false);
+        setShowServerMenu(false);
       }
     }, 3000);
-  }, [showSpeedMenu, showQualityMenu, showVolumeSlider]);
+  }, [showSpeedMenu, showQualityMenu, showVolumeSlider, showServerMenu]);
 
   const handleMouseMove = useCallback(() => {
     resetHideTimer();
@@ -1618,10 +1663,23 @@ function HlsVideoPlayer({
 
         lastTapRef.current = { time: 0, x: 0 };
       } else {
+        // Single tap — toggle controls visibility (critical for mobile/PWA
+        // where there's no mousemove to bring controls back)
+        setShowControls((prev) => {
+          if (!prev) {
+            // Controls were hidden — show them and restart auto-hide timer
+            resetHideTimer();
+            return true;
+          }
+          // Controls were visible — keep them visible on mobile (tap to hide
+          // is confusing), let auto-hide timer handle it
+          resetHideTimer();
+          return true;
+        });
         lastTapRef.current = { time: now, x: clientX };
       }
     },
-    [seekBy, isMemberLocked],
+    [seekBy, isMemberLocked, resetHideTimer],
   );
 
   // Keyboard shortcuts
@@ -2894,6 +2952,65 @@ function HlsVideoPlayer({
                     </button>
                   )}
 
+                  {/* Server switcher — same UI as IframeEmbedPlayer */}
+                  {hasMultipleProviders && (
+                    <div className="relative">
+                      <button
+                        onClick={() => setShowServerMenu((prev) => !prev)}
+                        className={cn(
+                          'flex items-center gap-1.5 h-8 px-3 rounded-full text-[11px] font-semibold tracking-wide transition-all duration-200',
+                          'bg-white/[0.1] hover:bg-white/[0.18] border border-white/[0.06]',
+                          'text-white/90 hover:text-white active:scale-95',
+                          showServerMenu && 'bg-white/[0.18] border-white/[0.12] text-white',
+                        )}
+                        aria-label="Switch server"
+                      >
+                        <span className="truncate max-w-[72px]">{currentLabel}</span>
+                        <ChevronDown className={cn(
+                          'h-3 w-3 text-white/50 transition-transform duration-200 flex-shrink-0',
+                          showServerMenu && 'rotate-180',
+                        )} />
+                      </button>
+
+                      {/* Server dropdown */}
+                      <AnimatePresence>
+                        {showServerMenu && (
+                          <motion.div
+                            className="absolute bottom-full right-0 mb-2 w-40 rounded-2xl bg-[#1a1a1a]/95 backdrop-blur-xl border border-white/[0.08] shadow-2xl shadow-black/60 z-[120] py-1 overflow-hidden"
+                            initial={{ opacity: 0, y: -4, scale: 0.97 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: -4, scale: 0.97 }}
+                            transition={{ duration: 0.15, ease: [0.32, 0.72, 0, 1] }}
+                          >
+                            {uniqueProviders.map((provider) => {
+                              const isActive = provider.label === currentLabel;
+                              return (
+                                <button
+                                  key={provider.label}
+                                  onClick={() => { switchToSource(provider.urlIndex); setShowServerMenu(false); }}
+                                  className={cn(
+                                    'w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-all duration-150',
+                                    isActive
+                                      ? 'bg-sv-red/20 text-white'
+                                      : 'text-white/50 hover:text-white hover:bg-white/[0.06]',
+                                  )}
+                                >
+                                  <span className={cn(
+                                    'w-1.5 h-1.5 rounded-full flex-shrink-0 transition-colors',
+                                    isActive ? 'bg-sv-red' : 'bg-white/15',
+                                  )} />
+                                  <span className="flex-1 text-[13px] font-medium truncate">
+                                    {provider.label}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
+
                   {/* Fullscreen — available to all users */}
                   <button
                     onClick={toggleFs}
@@ -2914,12 +3031,13 @@ function HlsVideoPlayer({
       </AnimatePresence>
 
       {/* Click-away dismiss for menus */}
-      {(showSpeedMenu || showQualityMenu) && (
+      {(showSpeedMenu || showQualityMenu || showServerMenu) && (
         <div
           className="absolute inset-0 z-[103]"
           onClick={() => {
             setShowSpeedMenu(false);
             setShowQualityMenu(false);
+            setShowServerMenu(false);
           }}
         />
       )}
@@ -3249,6 +3367,13 @@ export default function VideoPlayer(props: VideoPlayerProps) {
       {...props}
       src={currentSrc}
       onFatalError={handleHlsFatalError}
+      onSwitchSource={(urlIndex, allUrls) => {
+        const url = allUrls[urlIndex];
+        if (url) {
+          setCurrentSrc(url);
+          setForceIframe(false);
+        }
+      }}
     />
   );
 
