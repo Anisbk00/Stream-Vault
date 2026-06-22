@@ -5,7 +5,7 @@ const path = require('path');
 
 function buildShieldSVG(size) {
   // Shield icon matching the splash screen's Lucide Shield + red color
-  // Lucide shield path, scaled and centered in the canvas
+  // FILLED shield for visibility at small home-screen icon sizes
   const padding = Math.round(size * 0.15);
   const inner = size - padding * 2;
   const bgRadius = Math.round(size * 0.22);
@@ -16,19 +16,23 @@ function buildShieldSVG(size) {
       <stop offset="0%" stop-color="#0a0a0a"/>
       <stop offset="100%" stop-color="#060606"/>
     </linearGradient>
+    <linearGradient id="shieldFill" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop offset="0%" stop-color="#FF1A25"/>
+      <stop offset="100%" stop-color="#C2070F"/>
+    </linearGradient>
   </defs>
   <!-- Void black background with rounded corners -->
   <rect width="${size}" height="${size}" rx="${bgRadius}" ry="${bgRadius}" fill="url(#bg)"/>
-  <!-- Red Shield emblem — Lucide Shield path, centered -->
+  <!-- Filled Red Shield emblem — Lucide Shield path, centered -->
   <g transform="translate(${padding}, ${padding}) scale(${inner / 24})">
     <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
-          fill="none" stroke="#E50914" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          fill="url(#shieldFill)" stroke="#E50914" stroke-width="0.8" stroke-linejoin="round"/>
   </g>
 </svg>`;
 }
 
 function buildMaskableSVG(size) {
-  // Maskable: same shield but with extra safe zone padding
+  // Maskable: filled shield with extra safe zone padding
   const safePad = Math.round(size * 0.10);
   const inner = size - safePad * 2;
   const bgRadius = Math.round(inner * 0.22);
@@ -36,14 +40,20 @@ function buildMaskableSVG(size) {
   const shieldInner = inner - shieldPad * 2;
 
   return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="shieldFill" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+      <stop offset="0%" stop-color="#FF1A25"/>
+      <stop offset="100%" stop-color="#C2070F"/>
+    </linearGradient>
+  </defs>
   <!-- Solid background for maskable shape -->
   <rect width="${size}" height="${size}" fill="#080808"/>
   <g transform="translate(${safePad}, ${safePad})">
     <rect width="${inner}" height="${inner}" rx="${bgRadius}" ry="${bgRadius}" fill="#0a0a0a"/>
-    <!-- Shield emblem -->
+    <!-- Filled Shield emblem -->
     <g transform="translate(${shieldPad}, ${shieldPad}) scale(${shieldInner / 24})">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"
-            fill="none" stroke="#E50914" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            fill="url(#shieldFill)" stroke="#E50914" stroke-width="0.8" stroke-linejoin="round"/>
     </g>
   </g>
 </svg>`;
