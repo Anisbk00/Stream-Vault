@@ -1,0 +1,2002 @@
+     1→'use client';
+     2→
+     3→import {
+     4→  useRef,
+     5→  useEffect,
+     6→  useState,
+     7→  useCallback,
+     8→  useMemo,
+     9→  Component,
+    10→  type ErrorInfo,
+    11→  type ReactNode,
+    12→  type MouseEvent as ReactMouseEvent,
+    13→} from 'react';
+    14→import Hls from 'hls.js';
+    15→import { MemoryHlsLoader } from '@/lib/hls-memory-loader';
+    16→import { setupFmp4MseProgressive, combineFragmentPairs, parseFmp4Fragments, type ProgressiveMseHandle } from '@/lib/fmp4-mse-player';
+    17→import { getCachedSegments } from '@/lib/ts-to-mp4';
+    18→import { motion, AnimatePresence } from 'framer-motion';
+    19→import {
+    20→  Play,
+    21→  Pause,
+    22→  Volume2,
+    23→  Volume1,
+    24→  VolumeX,
+    25→  Maximize,
+    26→  Minimize,
+    27→  ArrowLeft,
+    28→
+    29→  PictureInPicture2,
+    30→  Loader2,
+    31→  AlertCircle,
+    32→  RotateCcw,
+    33→  ChevronDown,
+    34→  ExternalLink,
+    35→  Mic,
+    36→  MicOff,
+    37→  Subtitles,
+    38→} from 'lucide-react';
+    39→import { cn } from '@/lib/utils';
+    40→import { useFullscreen, requestWakeLock, lockOrientation, unlockOrientation } from '@/hooks/use-fullscreen';
+    41→
+    42→// ─── Props ───────────────────────────────────────────────────────────────────
+    43→
+    44→/** Watch Party sync configuration — when provided, the player syncs with a watch party */
+    45→export interface WatchPartySync {
+    46→  /** Whether the current user is the host */
+    47→  isHost: boolean;
+    48→  /** User ID of the person who paused (null if playing) */
+    49→  pausedBy: string | null;
+    50→  /** Called when the local user pauses playback */
+    51→  onPause: (currentTime: number) => void;
+    52→  /** Called when the local user plays/resumes playback */
+    53→  onPlay: (currentTime: number) => Promise<boolean>;
+    54→  /** Called when the local user seeks */
+    55→  onSeek: (currentTime: number) => Promise<boolean>;
+    56→  /** Called periodically to sync playback state */
+    57→  onSync: (currentTime: number, isPlaying: boolean, duration: number) => void;
+    58→  /** Pause notification to display (from another user pausing) */
+    59→  pauseNotification: { pausedByName: string; currentTime: number } | null;
+    60→  /** Called when PTT button is pressed (user starts speaking) */
+    61→  onPttStart?: () => void;
+    62→  /** Called when PTT button is released (user stops speaking) */
+    63→  onPttStop?: () => void;
+    64→  /** Whether PTT is currently active (user is speaking) */
+    65→  isPttActive?: boolean;
+    66→  /** Set of user IDs currently talking (for speaking indicators) */
+    67→  talkingMembers?: Set<string>;
+    68→  /** Host's current playback time — members seek to this when drift exceeds threshold */
+    69→  hostCurrentTime?: number;
+    70→  /** Whether the host is currently playing — members match this state */
+    71→  hostIsPlaying?: boolean;
+    72→  /** Party members list for displaying speaking indicators */
+    73→  members?: { userId: string; displayName: string; avatarUrl: string | null; isHost: boolean }[]
+    74→  /** Local user ID for identifying self in member list */
+    75→  localUserId?: string
+    76→  /**
+    77→   * The playback time at which the current party session started.
+    78→   * Unlike hostCurrentTime (overwritten every 500ms by host sync),
+    79→   * this stays fixed so the player can detect when an embed provider
+    80→   * resumes from its own saved progress instead of the party start.
+    81→   */
+    82→  partyStartTime: number
+    83→  /**
+    84→   * The sentAt (ms epoch) from the host's most recent sync broadcast.
+    85→   * Members use this to calculate one-way network latency for precise
+    86→   * drift compensation, replacing the hardcoded 0.25s guess.
+    87→   */
+    88→  lastSyncSentAt?: number
+    89→}
+    90→
+    91→interface VideoPlayerProps {
+    92→  src: string;
+    93→  fallbackUrls?: string[];
+    94→  poster?: string;
+    95→  title?: string;
+    96→  startTime?: number;
+    97→  onClose: () => void;
+    98→  onProgressUpdate?: (time: number, duration: number) => void;
+    99→  onCompleted?: () => void;
+   100→  contentId?: string | number;
+   101→  mediaType?: 'movie' | 'tv';
+   102→  season?: number;
+   103→  episode?: number;
+   104→  autoPlay?: boolean;
+   105→  subtitleUrls?: Record<string, string>;
+   106→  /** Subtitle track metadata for UI display */
+   107→  subtitleTracks?: { language: string; name: string; isDefault: boolean }[];
+   108→  /** Force HLS.js playback (for fake m3u8 from downloaded content) */
+   109→  useHls?: boolean;
+   110→  /** ID for in-memory segment data (custom HLS.js loader bypasses blob URLs) */
+   111→  hlsPlaybackId?: string;
+   112→  /** fMP4 blob for MSE-based playback (downloaded HLS content remuxed to MP4) */
+   113→  fmp4Blob?: Blob;
+   114→  /** Watch Party sync — when provided, the player syncs playback with the party */
+   115→  watchPartySync?: WatchPartySync;
+   116→}
+   117→
+   118→interface HlsLevel {
+   119→  height: number;
+   120→  width: number;
+   121→  bitrate: number;
+   122→  name?: string;
+   123→}
+   124→
+   125→interface PlayerEventData {
+   126→  player_info?: {
+   127→    tmdb?: string | number;
+   128→    imdb?: string;
+   129→    mediaType?: string;
+   130→    season?: number;
+   131→    episode?: number;
+   132→    title?: string;
+   133→    poster?: string;
+   134→  };
+   135→  player_status?: 'playing' | 'paused' | 'completed' | 'seeked';
+   136→  player_progress?: number;
+   137→  player_duration?: number;
+   138→  quality?: { label?: string };
+   139→  availableQualities?: string[];
+   140→}
+   141→
+   142→// ─── Helpers ─────────────────────────────────────────────────────────────────
+   143→
+   144→function formatTime(seconds: number): string {
+   145→  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+   146→  const h = Math.floor(seconds / 3600);
+   147→  const m = Math.floor((seconds % 3600) / 60);
+   148→  const s = Math.floor(seconds % 60);
+   149→  if (h > 0) return `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+   150→  return `${m}:${s.toString().padStart(2, '0')}`;
+   151→}
+   152→
+   153→function qualityLabel(height: number): string {
+   154→  if (height >= 2160) return '4K';
+   155→  if (height >= 1440) return '1440p';
+   156→  if (height >= 1080) return '1080p';
+   157→  if (height >= 720) return '720p';
+   158→  if (height >= 480) return '480p';
+   159→  if (height >= 360) return '360p';
+   160→  return `${height}p`;
+   161→}
+   162→
+   163→const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+   164→
+   165→function isEmbedUrl(src: string): boolean {
+   166→  return (
+   167→    /(?:vaplayer\.ru|vidapi\.ru)/i.test(src) ||
+   168→    /\/embed\//i.test(src)
+   169→  );
+   170→}
+   171→
+   172→// ── Global PTT portal mount point ──────────────────────────
+   173→// When the video player enters fullscreen, the Fullscreen API only renders
+   174→// descendants of the fullscreen element. The WatchPartyRoom's floating PTT
+   175→// button (portaled to document.body) is OUTSIDE the fullscreen element and
+   176→// gets hidden. This module-level ref lets the video player expose its
+   177→// container so PTT can portal INSIDE it during fullscreen.
+   178→let _playerContainerForPtt: HTMLDivElement | null = null;
+   179→
+   180→export function getPlayerContainerForPtt(): HTMLDivElement | null {
+   181→  return _playerContainerForPtt;
+   182→}
+   183→
+   184→function setPlayerContainerForPtt(el: HTMLDivElement | null) {
+   185→  _playerContainerForPtt = el;
+   186→}
+   187→
+   188→/** Known embed provider origins — used for postMessage origin validation */
+   189→const ALLOWED_MESSAGE_ORIGINS = [
+   190→  'vidapi.ru', 'vaplayer.ru',
+   191→  // Inner CDN providers used by vidapi.ru / vaplayer.ru
+   192→  'nextgencloudfabric.com', 'justhd.tv',
+   193→];
+   194→
+   195→function isAllowedMessageOrigin(origin: string): boolean {
+   196→  try {
+   197→    const hostname = new URL(origin).hostname;
+   198→    return ALLOWED_MESSAGE_ORIGINS.some(
+   199→      (allowed) => hostname === allowed || hostname.endsWith('.' + allowed),
+   200→    );
+   201→  } catch {
+   202→    return false;
+   203→  }
+   204→}
+   205→
+   206→// ─── Iframe Embed Player ─────────────────────────────────────────────────────
+   207→
+   208→/** Extract a human-readable provider label from URL */
+   209→function getProviderLabel(url: string): string {
+   210→  try {
+   211→    const hostname = new URL(url).hostname;
+   212→    if (hostname.includes('vidapi') || hostname.includes('vaplayer')) return 'VidAPI';
+   213→    return hostname.split('.').slice(-2).join('.');
+   214→  } catch {
+   215→    return 'Source';
+   216→  }
+   217→}
+   218→
+   219→/** Normalise a source URL — strips proxy wrapper if present.
+   220→ *  We load embed URLs directly in the iframe (not through a server proxy)
+   221→ *  because the proxy changes the page origin, breaking Cloudflare JS,
+   222→ *  cookies, and the embed player's own API calls. This was the root cause
+   223→ *  of both the CORS errors on web and the "something went wrong" error in PWA.
+   224→ */
+   225→function unwrapProxyUrl(url: string): string {
+   226→  // If the URL is our proxy wrapper, extract the real URL
+   227→  const proxyPrefix = '/api/stream/embed?url=';
+   228→  if (url.startsWith(proxyPrefix)) {
+   229→    try {
+   230→      return decodeURIComponent(url.slice(proxyPrefix.length));
+   231→    } catch {
+   232→      return url;
+   233→    }
+   234→  }
+   235→  return url;
+   236→}
+   237→
+   238→function IframeEmbedPlayer({
+   239→  src,
+   240→  fallbackUrls,
+   241→  title,
+   242→  mediaType,
+   243→  onClose,
+   244→  onProgressUpdate,
+   245→  onCompleted,
+   246→  watchPartySync,
+   247→}: {
+   248→  src: string;
+   249→  fallbackUrls?: string[];
+   250→  title?: string;
+   251→  mediaType?: 'movie' | 'tv';
+   252→  onClose: () => void;
+   253→  onProgressUpdate?: (time: number, duration: number) => void;
+   254→  onCompleted?: () => void;
+   255→  watchPartySync?: WatchPartySync;
+   256→}) {
+   257→  const containerRef = useRef<HTMLDivElement>(null);
+   258→  const iframeRef = useRef<HTMLIFrameElement>(null);
+   259→
+   260→  // Expose container to WatchPartyRoom for PTT portal in fullscreen
+   261→  const setContainerRef = useCallback((el: HTMLDivElement | null) => {
+   262→    containerRef.current = el;
+   263→    setPlayerContainerForPtt(el);
+   264→  }, []);
+   265→
+   266→  const [showOverlay, setShowOverlay] = useState(false);
+   267→  // Fullscreen state: on iOS we use CSS fullscreen (position:fixed), on other
+   268→  // platforms we use the standard Fullscreen API. The `setIsFullscreen` setter
+   269→  // is used by the fullscreenchange listener to track API-based fullscreen.
+   270→  const [isFullscreen, setIsFullscreen] = useState(false);
+   271→
+   272→  const [iframeTitle, setIframeTitle] = useState(title || '');
+   273→
+   274→  // ── Watch Party iframe sync state ────────────────────────
+   275→  // Track the iframe's playback position from PLAYER_EVENT postMessages.
+   276→  // This is the ONLY way to know the iframe video's current time since
+   277→  // cross-origin iframes don't expose their DOM. The HlsVideoPlayer has
+   278→  // direct access to video.currentTime, but IframeEmbedPlayer must rely
+   279→  // on the embed provider's postMessage protocol.
+   280→  const iframeTimeRef = useRef(0);
+   281→  const iframeDurationRef = useRef(0);
+   282→  const iframePlayingRef = useRef(false);
+   283→  const hasReceivedProgressRef = useRef(false);
+   284→  const initialSyncDoneRef = useRef(false);
+   285→  const lastIframeSeekRef = useRef(0);
+   286→
+   287→  // ── First-progress correction ────────────────────────────
+   288→  // Embed providers (vidsrc.to, vidapi.ru) save the user's watch
+   289→  // progress in their own cookies/localStorage and resume from there
+   290→  // on page load, IGNORING the ?t=0 query parameter. This means both
+   291→  // host and member can start from e.g. 45:00 instead of 0.
+   292→  // We detect this by capturing the first reported progress and
+   293→  // comparing it to partyStartTime (the expected start position).
+   294→  // If the drift exceeds a threshold, we immediately attempt correction.
+   295→  const wpFirstProgressCorrectedRef = useRef(false);
+   296→  const [wpFirstProgressTime, setWpFirstProgressTime] = useState<number | null>(null);
+   297→
+   298→  // ── PostMessage sync detection ───────────────────────────
+   299→  // Most embed providers (vidapi.ru, vidsrc.to) only send OUTBOUND
+   300→  // PLAYER_EVENT postMessages but ignore inbound PLAYER_COMMAND messages.
+   301→  // We detect this by checking if the iframe time actually changes after
+   302→  // a seek command. Once detected as unsupported, we fall back to
+   303→  // URL reload sync which works universally.
+   304→  const postMessageSyncDetected = useRef<boolean | null>(null);
+   305→  // null = not yet tested, true = works, false = doesn't work
+   306→  const lastUrlReloadRef = useRef(0);
+   307→  const URL_RELOAD_COOLDOWN_MS = 30_000; // Don't reload more than once per 30s (prevents reload loops on slow PWA connections)
+   308→
+   309→  // Source cycling state — use direct embed URLs (no proxy wrapping)
+   310→  // Proxy wrapping was the root cause of CORS errors on web and
+   311→  // "something went wrong" in PWA — it changes the page origin.
+   312→  // useMemo: allUrls is used as a useCallback dependency for tryNextSource.
+   313→  // Without memoization, it creates a new array ref every render →
+   314→  // tryNextSource recreates → useEffect([currentSrc, tryNextSource]) fires
+   315→  // every render → Turbopack build analysis fails on the unstable dep chain.
+   316→  const allUrls = useMemo(
+   317→    () => [src, ...(fallbackUrls || [])]
+   318→      .filter(Boolean)
+   319→      .map(unwrapProxyUrl)
+   320→      .map((url) => {
+   321→        // Watch Party: override embed provider's saved progress by appending
+   322→        // ?t=0 to the URL. Embed providers (vidapi.ru, vidsrc.to) remember
+   323→        // the user's last position and resume from there, which breaks sync
+   324→        // because the host may be at 45min while the member starts at 0.
+   325→        // ?t=0 forces both to start from the beginning.
+   326→        if (watchPartySync) {
+   327→          try {
+   328→            const u = new URL(url);
+   329→            u.searchParams.set('t', '0');
+   330→            return u.toString();
+   331→          } catch { /* not a valid URL, pass through */ }
+   332→        }
+   333→        return url;
+   334→      }),
+   335→    [src, fallbackUrls, watchPartySync],
+   336→  );
+   337→  const currentIndexRef = useRef(0);
+   338→  const [currentSrc, setCurrentSrc] = useState(() => allUrls[0] || '');
+   339→  // ── Deduplicated provider list for server switcher ────
+   340→  // Group URLs by provider label so the user sees distinct servers
+   341→  // (e.g. VidAPI only once, not twice for vidapi.ru + vaplayer.ru)
+   342→  const uniqueProviders = useMemo(() => {
+   343→    const seen = new Set<string>();
+   344→    const result: { label: string; urlIndex: number }[] = [];
+   345→    allUrls.forEach((url, i) => {
+   346→      const label = getProviderLabel(url);
+   347→      if (!seen.has(label)) {
+   348→        seen.add(label);
+   349→        result.push({ label, urlIndex: i });
+   350→      }
+   351→    });
+   352→    return result;
+   353→  }, [allUrls]);
+   354→
+   355→  const [currentLabel, setCurrentLabel] = useState(() => (allUrls[0] ? getProviderLabel(allUrls[0]) : 'Source'));
+   356→  const [showServerMenu, setShowServerMenu] = useState(false);
+   357→  const hasMultipleProviders = uniqueProviders.length > 1;
+   358→  const [hasError, setHasError] = useState(allUrls.length === 0);
+   359→  const [isTrying, setIsTrying] = useState(allUrls.length > 0);
+   360→  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   361→  const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   362→  const iframeLoadedRef = useRef(false);
+   363→  // ── Playback verification ────────────────────────────────
+   364→  // The iframe `onload` event fires even when the inner video fails
+   365→  // (e.g. embed provider returns 404 inside their player shell).
+   366→  // We can't detect the failure cross-origin, so we use a secondary
+   367→  // timer: if no PLAYER_EVENT postMessage arrives within
+   368→  // VERIFICATION_TIMEOUT after iframe onload, the source is
+   369→  // considered broken and we cycle to the next fallback.
+   370→  const playbackVerifiedRef = useRef(false);
+   371→  const verificationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+   372→
+   373→  // iOS detection — iOS Safari/WKWebView does NOT support requestFullscreen()
+   374→  // on <div> elements (only on <video> elements). We use CSS-based fullscreen
+   375→  // as a fallback: position:fixed covering the entire viewport.
+   376→  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+   377→    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+   378→
+   379→  // CSS-based fullscreen state for iOS (standard Fullscreen API doesn't work on divs)
+   380→  const [cssFullscreen, setCssFullscreen] = useState(false);
+   381→
+   382→  // Fullscreen toggle — uses CSS fullscreen on iOS, standard API elsewhere.
+   383→  // On iOS, both cssFullscreen AND isFullscreen are updated together so
+   384→  // downstream UI (speaking indicator, button icon) works uniformly.
+   385→  const toggleFullscreen = useCallback(async () => {
+   386→    if (!containerRef.current) return;
+   387→
+   388→    if (isIOS) {
+   389→      // iOS: toggle CSS-based fullscreen (position:fixed overlay)
+   390→      setCssFullscreen(prev => {
+   391→        const next = !prev;
+   392→        setIsFullscreen(next);
+   393→        return next;
+   394→      });
+   395→      return;
+   396→    }
+   397→
+   398→    // Non-iOS: use standard Fullscreen API (setIsFullscreen updated via event listener)
+   399→    try {
+   400→      const doc = document as Document & { webkitFullscreenElement?: Element; webkitExitFullscreen?: () => Promise<void> };
+   401→      const isFullscreenNow = !!document.fullscreenElement || !!doc.webkitFullscreenElement;
+   402→      if (!isFullscreenNow) {
+   403→        const el = containerRef.current as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> };
+   404→        if (el.requestFullscreen) {
+   405→          await el.requestFullscreen();
+   406→        } else if (el.webkitRequestFullscreen) {
+   407→          await el.webkitRequestFullscreen();
+   408→        }
+   409→      } else {
+   410→        if (document.exitFullscreen) {
+   411→          await document.exitFullscreen();
+   412→        } else if (doc.webkitExitFullscreen) {
+   413→          await doc.webkitExitFullscreen();
+   414→        }
+   415→      }
+   416→    } catch {
+   417→      // Fullscreen not supported or blocked
+   418→    }
+   419→  }, [isIOS]);
+   420→
+   421→  // Listen for fullscreen changes (both standard and webkit prefix)
+   422→  useEffect(() => {
+   423→    const handler = () => {
+   424→      const doc = document as Document & { webkitFullscreenElement?: Element };
+   425→      setIsFullscreen(!!document.fullscreenElement || !!doc.webkitFullscreenElement);
+   426→    };
+   427→    document.addEventListener('fullscreenchange', handler);
+   428→    document.addEventListener('webkitfullscreenchange', handler);
+   429→    return () => {
+   430→      document.removeEventListener('fullscreenchange', handler);
+   431→      document.removeEventListener('webkitfullscreenchange', handler);
+   432→    };
+   433→  }, []);
+   434→
+   435→  // Auto-enter fullscreen on first load (mobile)
+   436→  useEffect(() => {
+   437→    if (isIOS) {
+   438→      // eslint-disable-next-line react-hooks/set-state-in-effect -- auto-enter CSS fullscreen on iOS mount
+   439→      setCssFullscreen(true);
+   440→      return;
+   441→    }
+   442→    const isMobile = /Android/i.test(navigator.userAgent);
+   443→    const el = containerRef.current as HTMLElement & { webkitRequestFullscreen?: () => Promise<void> } | null;
+   444→    if (isMobile && el) {
+   445→      if (el.requestFullscreen) {
+   446→        el.requestFullscreen().catch(() => {});
+   447→      } else if (el.webkitRequestFullscreen) {
+   448→        el.webkitRequestFullscreen().catch(() => {});
+   449→      }
+   450→    }
+   451→  }, [isIOS]);
+   452→
+   453→  // Switch to a specific source by URL index — used by server switcher UI
+   454→  const switchToSource = useCallback((urlIndex: number) => {
+   455→    if (urlIndex < 0 || urlIndex >= allUrls.length) return;
+   456→    currentIndexRef.current = urlIndex;
+   457→    const label = getProviderLabel(allUrls[urlIndex]);
+   458→    setCurrentLabel(label || 'Source');
+   459→    setHasError(false);
+   460→    setIsTrying(true);
+   461→    iframeLoadedRef.current = false;
+   462→    playbackVerifiedRef.current = false;
+   463→    setShowServerMenu(false);
+   464→    if (verificationTimeoutRef.current) {
+   465→      clearTimeout(verificationTimeoutRef.current);
+   466→      verificationTimeoutRef.current = null;
+   467→    }
+   468→    setCurrentSrc(allUrls[urlIndex]);
+   469→  }, [allUrls]);
+   470→
+   471→  // Try the next fallback URL (with delay to prevent rapid iframe flashing)
+   472→  const tryNextSource = useCallback((immediate = false) => {
+   473→    const nextIndex = currentIndexRef.current + 1;
+   474→    if (nextIndex < allUrls.length) {
+   475→      currentIndexRef.current = nextIndex;
+   476→      const label = getProviderLabel(allUrls[nextIndex]);
+   477→      setCurrentLabel(label || 'Source');
+   478→      setHasError(false);
+   479→      setIsTrying(true);
+   480→      iframeLoadedRef.current = false;
+   481→      playbackVerifiedRef.current = false;
+   482→      if (verificationTimeoutRef.current) {
+   483→        clearTimeout(verificationTimeoutRef.current);
+   484→        verificationTimeoutRef.current = null;
+   485→      }
+   486→
+   487→      // Add a small delay before switching to avoid rapid iframe replacement
+   488→      // when multiple sources fail quickly (e.g., Cloudflare blocks)
+   489→      if (!immediate) {
+   490→        setTimeout(() => {
+   491→          setCurrentSrc(allUrls[nextIndex]);
+   492→        }, 800);
+   493→      } else {
+   494→        setCurrentSrc(allUrls[nextIndex]);
+   495→      }
+   496→    } else {
+   497→      setHasError(true);
+   498→      setIsTrying(false);
+   499→    }
+   500→  }, [allUrls]);
+   501→
+   502→  // Timeout: if embed doesn't produce actual playback within 15s, try next source.
+   503→  // This covers TWO failure modes:
+   504→  //   1. iframe never loads at all (network error, DNS failure)
+   505→  //   2. iframe loads but video inside fails (CDN 404, geo-block, broken embed)
+   506→  // The key insight: iframe onload fires even when the inner video fails.
+   507→  // We only clear this timeout when we receive a PLAYER_EVENT with actual
+   508→  // playback data (player_progress or player_status=playing), not just
+   509→  // metadata like player_info/title.
+   510→  useEffect(() => {
+   511→    if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+   512→
+   513→    loadTimeoutRef.current = setTimeout(() => {
+   514→      // No verified playback signal received — cycle to next source
+   515→      if (!playbackVerifiedRef.current) {
+   516→        console.log('[IframeEmbedPlayer] No playback signal within 15s — cycling to next source');
+   517→        tryNextSource();
+   518→      }
+   519→    }, 15000);
+   520→
+   521→    return () => {
+   522→      if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+   523→    };
+   524→  }, [currentSrc, tryNextSource]);
+   525→
+   526→  // Detect iframe load via iframe onload event
+   527→  // We only use this to hide the loading spinner — we do NOT consider
+   528→  // the source "working" just because the iframe HTML loaded.
+   529→  // The 15s playback-verification timeout above handles the real check.
+   530→  const handleIframeLoad = useCallback(() => {
+   531→    iframeLoadedRef.current = true;
+   532→    setIsTrying(false);
+   533→  }, []);
+   534→
+   535→  // Listen for PLAYER_EVENT postMessage from iframe
+   536→  useEffect(() => {
+   537→    const handleMessage = (event: MessageEvent) => {
+   538→      // SECURITY: Validate message origin — only accept PLAYER_EVENT from known embed providers.
+   539→      // Prevents malicious iframes from triggering fake progress/completed events
+   540→      // or manipulating player state (auto-advance, title injection, etc.).
+   541→      if (event.origin && !isAllowedMessageOrigin(event.origin)) return;
+   542→
+   543→      if (event.data && typeof event.data === 'object' && event.data.type === 'PLAYER_EVENT') {
+   544→        const data: PlayerEventData = event.data.data;
+   545→
+   546→        // iframe is communicating — at least the HTML player loaded
+   547→        iframeLoadedRef.current = true;
+   548→        setIsTrying(false);
+   549→
+   550→        if (!data) return;
+   551→
+   552→        // ── Playback verification ──────────────────────────────
+   553→        // Only mark source as "verified" when we receive actual playback
+   554→        // signals (player_progress or player_status=playing). A player_info
+   555→        // event with just the title does NOT mean the video is working —
+   556→        // the embed provider may send metadata before the CDN stream starts,
+   557→        // and the stream can still 404 after that.
+   558→        const isPlaybackEvent =
+   559→          data.player_progress !== undefined ||
+   560→          data.player_status === 'playing';
+   561→
+   562→        if (isPlaybackEvent && !playbackVerifiedRef.current) {
+   563→          playbackVerifiedRef.current = true;
+   564→          // Clear the 15s playback-verification timeout — source is confirmed working
+   565→          if (loadTimeoutRef.current) {
+   566→            clearTimeout(loadTimeoutRef.current);
+   567→            loadTimeoutRef.current = null;
+   568→          }
+   569→          if (verificationTimeoutRef.current) {
+   570→            clearTimeout(verificationTimeoutRef.current);
+   571→            verificationTimeoutRef.current = null;
+   572→          }
+   573→        }
+   574→
+   575→        if (data.player_info?.title) {
+   576→          setIframeTitle(data.player_info.title);
+   577→        }
+   578→
+   579→        // Track iframe playback state for watch party sync
+   580→        if (data.player_progress !== undefined) {
+   581→          const isFirstProgress = !hasReceivedProgressRef.current;
+   582→          iframeTimeRef.current = data.player_progress;
+   583→          hasReceivedProgressRef.current = true;
+   584→
+   585→          // Capture first progress for watch party correction.
+   586→          // Embed providers may resume from their own saved progress,
+   587→          // ignoring ?t=0. We need to detect and correct this.
+   588→          if (isFirstProgress && watchPartySync && !wpFirstProgressCorrectedRef.current) {
+   589→            wpFirstProgressCorrectedRef.current = true;
+   590→            setWpFirstProgressTime(data.player_progress);
+   591→          }
+   592→        }
+   593→        if (data.player_duration !== undefined) {
+   594→          iframeDurationRef.current = data.player_duration;
+   595→        }
+   596→        if (data.player_status === 'playing') {
+   597→          iframePlayingRef.current = true;
+   598→          if (onProgressUpdate && data.player_progress !== undefined && data.player_duration !== undefined) {
+   599→            onProgressUpdate(data.player_progress, data.player_duration);
+   600→          }
+   601→        } else if (data.player_status === 'paused') {
+   602→          iframePlayingRef.current = false;
+   603→        }
+   604→
+   605→        if (data.player_status === 'completed') {
+   606→          if (onCompleted) {
+   607→            onCompleted();
+   608→          }
+   609→        }
+   610→      }
+   611→    };
+   612→
+   613→    window.addEventListener('message', handleMessage);
+   614→    return () => window.removeEventListener('message', handleMessage);
+   615→  }, [onProgressUpdate, onCompleted]);
+   616→
+   617→  // ── Watch Party: Host sync broadcast ─────────────────────
+   618→  // Host broadcasts its current playback time every 250ms so members
+   619→  // can sync. Since we can't access iframe.currentTime (cross-origin),
+   620→  // we use the time reported by PLAYER_EVENT postMessages.
+   621→  useEffect(() => {
+   622→    if (!watchPartySync?.isHost) return;
+   623→    const interval = setInterval(() => {
+   624→      if (!hasReceivedProgressRef.current) return;
+   625→      watchPartySync.onSync(iframeTimeRef.current, iframePlayingRef.current, iframeDurationRef.current);
+   626→    }, 250);
+   627→    return () => clearInterval(interval);
+   628→  }, [watchPartySync?.isHost, watchPartySync?.onSync]);
+   629→
+   630→  // ── Watch Party: Send postMessage command to iframe ───────
+   631→  // Attempts to control the iframe's video playback via postMessage.
+   632→  // Most embed providers IGNORE inbound commands (one-way outbound only).
+   633→  // A verification check after seek detects whether the provider responds.
+   634→  const sendIframeCommand = useCallback((action: 'play' | 'pause' | 'seek', time?: number) => {
+   635→    const iframe = iframeRef.current;
+   636→    if (!iframe?.contentWindow) return;
+   637→
+   638→    // If we already know postMessage sync doesn't work, skip entirely
+   639→    if (postMessageSyncDetected.current === false && action === 'seek') return;
+   640→
+   641→    try {
+   642→      iframe.contentWindow.postMessage(
+   643→        { type: 'PLAYER_COMMAND', action, time },
+   644→        '*',
+   645→      );
+   646→    } catch {
+   647→      // Cross-origin restriction or iframe not ready
+   648→    }
+   649→
+   650→    // Verification: after sending a seek, check in 3s if the iframe time
+   651→    // actually moved. If not, the provider doesn't support inbound commands.
+   652→    if (action === 'seek' && time !== undefined && postMessageSyncDetected.current === null) {
+   653→      const timeBeforeSeek = iframeTimeRef.current;
+   654→      setTimeout(() => {
+   655→        const timeAfterSeek = iframeTimeRef.current;
+   656→        const expectedDiff = Math.abs(timeAfterSeek - timeBeforeSeek);
+   657→        // If the time hasn't changed significantly but we asked for a big jump,
+   658→        // the provider is ignoring our commands
+   659→        if (Math.abs(time - timeBeforeSeek) > 3 && expectedDiff < 2) {
+   660→          postMessageSyncDetected.current = false;
+   661→          console.log('[WatchParty] iframe does not respond to PLAYER_COMMAND — falling back to URL reload sync');
+   662→        } else {
+   663→          postMessageSyncDetected.current = true;
+   664→          console.log('[WatchParty] iframe responds to PLAYER_COMMAND — using postMessage sync');
+   665→        }
+   666→      }, 3000);
+   667→    }
+   668→  }, []);
+   669→
+   670→  // ── Watch Party: First-progress correction ───────────────
+   671→  // When the embed provider sends its first player_progress event,
+   672→  // compare it to partyStartTime. Embed providers save user progress
+   673→  // in their own storage and resume from there on load, ignoring ?t=0.
+   674→  // This effect detects the mismatch and immediately attempts to seek
+   675→  // or reload. Works for BOTH host and member (unlike drift correction
+   676→  // which only runs for members).
+   677→  useEffect(() => {
+   678→    if (wpFirstProgressTime === null) return;
+   679→    if (!watchPartySync) return;
+   680→
+   681→    const expectedTime = watchPartySync.partyStartTime ?? 0;
+   682→    const actualTime = wpFirstProgressTime;
+   683→    const drift = Math.abs(actualTime - expectedTime);
+   684→
+   685→    // Only correct if the drift is significant (>3s). Small drifts
+   686→    // are handled by the normal drift correction mechanism.
+   687→    if (drift > 3) {
+   688→      const targetTime = Math.round(expectedTime) || 0;
+   689→      // Immediately try postMessage seek
+   690→      sendIframeCommand('seek', targetTime);
+   691→
+   692→      // For hosts: also reload the iframe URL with the correct time.
+   693→      // Unlike members (who have initialSyncDoneRef), the host has no
+   694→      // URL-reload fallback, so we do it here for reliability.
+   695→      if (watchPartySync.isHost) {
+   696→        try {
+   697→          const url = new URL(currentSrc);
+   698→          url.searchParams.set('t', String(targetTime));
+   699→          url.searchParams.set('_wp', String(Date.now()));
+   700→          iframeLoadedRef.current = false;
+   701→          queueMicrotask(() => setCurrentSrc(url.toString()));
+   702→        } catch {
+   703→          // URL parse failed — postMessage seek is already attempted above
+   704→        }
+   705→      }
+   706→    }
+   707→  }, [wpFirstProgressTime]);
+   708→
+   709→  // ── Watch Party: Member initial sync (one-time) ──────────
+   710→  // When a member joins mid-movie, the host may already be minutes in.
+   711→  // The iframe starts from 0 by default. We reload the iframe URL with
+   712→  // ?t={hostTime} query parameter so it starts at the correct position.
+   713→  // This is more reliable than hash parameters (#t=) because embed
+   714→  // providers use hash for their own config (e.g. #quality=1080p).
+   715→  // Uses setCurrentSrc() for proper React lifecycle (key prop remount).
+   716→  //
+   717→  // IMPORTANT: We ALWAYS perform the reload (even when hostTime is 0)
+   718→  // because embed providers (vidapi.ru, vidsrc.to) remember the user's
+   719→  // previous progress in their own storage and may resume from there,
+   720→  // ignoring ?t=0. A full iframe reload is the only way to force
+   721→  // the embed provider to start from the correct position.
+   722→  useEffect(() => {
+   723→    if (!watchPartySync || watchPartySync.isHost) return;
+   724→    if (initialSyncDoneRef.current) return;
+   725→    if (watchPartySync.hostCurrentTime === undefined || watchPartySync.hostCurrentTime === null) return;
+   726→
+   727→    if (!iframeLoadedRef.current) return;
+   728→
+   729→    const hostTime = watchPartySync.hostCurrentTime;
+   730→    // Calculate one-way latency from the sync broadcast's sentAt timestamp.
+   731→    // Falls back to 0.3s if sentAt is unavailable (first sync before broadcast).
+   732→    const oneWayLatency = watchPartySync.lastSyncSentAt
+   733→      ? Math.min((Date.now() - watchPartySync.lastSyncSentAt) / 1000, 2)
+   734→      : 0.3;
+   735→    const targetTime = Math.max(0, Math.round(hostTime + oneWayLatency));
+   736→
+   737→    initialSyncDoneRef.current = true;
+   738→
+   739→    try {
+   740→      const url = new URL(currentSrc);
+   741→      // Use query parameter ?t= instead of hash #t= — more widely supported
+   742→      // by embed providers (vidapi.ru, vidsrc.to, embed.su)
+   743→      url.searchParams.set('t', String(targetTime));
+   744→      // Add a cache-busting parameter to force the iframe to actually reload.
+   745→      // Without this, if the URL is identical (e.g. ?t=0 was already set),
+   746→      // React's key-based remount doesn't fire and the embed provider doesn't
+   747→      // reload — it just resumes from its saved progress.
+   748→      url.searchParams.set('_wp', String(Date.now()));
+   749→      iframeLoadedRef.current = false;
+   750→      // Schedule state update outside effect to avoid cascading renders.
+   751→      // The key={currentSrc} prop will remount the iframe on next render.
+   752→      const newUrl = url.toString();
+   753→      queueMicrotask(() => setCurrentSrc(newUrl));
+   754→    } catch {
+   755→      // URL parse failed — postMessage seek as last resort
+   756→      sendIframeCommand('seek', targetTime);
+   757→    }
+   758→  }, [watchPartySync?.isHost, watchPartySync?.hostCurrentTime, currentSrc, sendIframeCommand]);
+   759→
+   760→  // ── Watch Party: Member ongoing drift correction ──────────
+   761→  // After initial sync, continuously correct drift. Two sync strategies:
+   762→  //   1. postMessage seek (if provider supports inbound commands)
+   763→  //   2. URL reload fallback (if postMessage is detected as unsupported)
+   764→  // URL reload is disruptive (full page reload inside iframe) but is
+   765→  // the ONLY reliable way to sync with providers that ignore postMessage.
+   766→  // Dual mechanism (same pattern as HlsVideoPlayer):
+   767→  //   A. Effect-based: triggers when hostCurrentTime prop changes
+   768→  //   B. Interval-based: polls every 1s to catch drift between broadcasts
+   769→  const URL_RELOAD_DRIFT_THRESHOLD = 8; // Only URL-reload for drifts > 8s (higher threshold to prevent reload loops on slow PWA/cellular)
+   770→
+   771→  // Helper: reload iframe URL with ?t= parameter
+   772→  // Uses direct DOM mutation instead of setCurrentSrc to avoid setState-in-effect.
+   773→  // Acceptable here because URL reload is already disruptive (full page reload).
+   774→  const reloadIframeAtTime = useCallback((targetTime: number) => {
+   775→    const now = Date.now();
+   776→    if (now - lastUrlReloadRef.current < URL_RELOAD_COOLDOWN_MS) return;
+   777→    lastUrlReloadRef.current = now;
+   778→
+   779→    const iframe = iframeRef.current;
+   780→    if (!iframe) return;
+   781→
+   782→    try {
+   783→      const url = new URL(currentSrc);
+   784→      url.searchParams.set('t', String(Math.round(targetTime)));
+   785→      iframeLoadedRef.current = false;
+   786→      iframe.src = url.toString();
+   787→    } catch {
+   788→      // URL parse failed
+   789→    }
+   790→  }, [currentSrc]);
+   791→
+   792→  // Helper: calculate dynamic latency offset from sync broadcast's sentAt.
+   793→  // Falls back to 0.25s when sentAt is unavailable.
+   794→  const calcLatencyOffset = useCallback((sentAt?: number) => {
+   795→    if (!sentAt) return 0.25;
+   796→    const raw = (Date.now() - sentAt) / 1000;
+   797→    // Sanity bounds: 0.05s minimum (local/CDN), 2s maximum (extreme network)
+   798→    return Math.max(0.05, Math.min(raw, 2));
+   799→  }, []);
+   800→
+   801→  // Effect-based drift correction
+   802→  useEffect(() => {
+   803→    if (!watchPartySync || watchPartySync.isHost) return;
+   804→    if (!hasReceivedProgressRef.current) return;
+   805→    if (!initialSyncDoneRef.current) return;
+   806→    if (watchPartySync.hostCurrentTime === undefined || watchPartySync.hostCurrentTime === null) return;
+   807→
+   808→    const myTime = iframeTimeRef.current;
+   809→    const hostTime = watchPartySync.hostCurrentTime;
+   810→    const safeTarget = iframeDurationRef.current > 0 ? iframeDurationRef.current - 0.1 : hostTime + 10;
+   811→    const latencyOffset = calcLatencyOffset(watchPartySync.lastSyncSentAt);
+   812→    const targetTime = Math.min(hostTime + latencyOffset, safeTarget);
+   813→    const drift = Math.abs(myTime - targetTime);
+   814→
+   815→    const SYNC_THRESHOLD = 0.3; // seconds — seek for drifts above this
+   816→    const EMERGENCY_THRESHOLD = 1.5; // seconds — immediate seek, bypass throttle
+   817→    const THROTTLE_MS = 500; // ms — minimum between seeks
+   818→
+   819→    if (drift > EMERGENCY_THRESHOLD) {
+   820→      if (postMessageSyncDetected.current === false && drift > URL_RELOAD_DRIFT_THRESHOLD) {
+   821→        // postMessage doesn't work and drift is large — reload URL
+   822→        reloadIframeAtTime(targetTime);
+   823→      } else {
+   824→        // Try postMessage first (verification will detect if it doesn't work)
+   825→        sendIframeCommand('seek', Math.round(targetTime));
+   826→      }
+   827→      lastIframeSeekRef.current = Date.now();
+   828→    } else if (drift > SYNC_THRESHOLD) {
+   829→      const now = Date.now();
+   830→      if (now - lastIframeSeekRef.current < THROTTLE_MS) return;
+   831→      lastIframeSeekRef.current = now;
+   832→      // Only use postMessage for small drifts (URL reload too disruptive)
+   833→      sendIframeCommand('seek', Math.round(targetTime));
+   834→    }
+   835→  }, [watchPartySync?.hostCurrentTime, watchPartySync?.hostIsPlaying, watchPartySync?.isHost, watchPartySync?.lastSyncSentAt, sendIframeCommand, reloadIframeAtTime, calcLatencyOffset]);
+   836→
+   837→  // Interval-based drift correction (polls every 1s)
+   838→  useEffect(() => {
+   839→    if (!watchPartySync || watchPartySync.isHost) return;
+   840→    const sync = watchPartySync;
+   841→
+   842→    const interval = setInterval(() => {
+   843→      if (!hasReceivedProgressRef.current) return;
+   844→      if (!initialSyncDoneRef.current) return;
+   845→      if (sync.hostCurrentTime === undefined || sync.hostCurrentTime === null) return;
+   846→      if (!sync.hostIsPlaying) return;
+   847→
+   848→      const myTime = iframeTimeRef.current;
+   849→      const hostTime = sync.hostCurrentTime;
+   850→      const safeTarget = iframeDurationRef.current > 0 ? iframeDurationRef.current - 0.1 : hostTime + 10;
+   851→      const latencyOffset = calcLatencyOffset(sync.lastSyncSentAt);
+   852→      const targetTime = Math.min(hostTime + latencyOffset, safeTarget);
+   853→      const drift = Math.abs(myTime - targetTime);
+   854→
+   855→      if (drift > URL_RELOAD_DRIFT_THRESHOLD && postMessageSyncDetected.current === false) {
+   856→        // Large drift + postMessage doesn't work — reload URL
+   857→        reloadIframeAtTime(targetTime);
+   858→      } else if (drift > 1.5) {
+   859→        sendIframeCommand('seek', Math.round(targetTime));
+   860→        lastIframeSeekRef.current = Date.now();
+   861→      } else if (drift > 0.3) {
+   862→        const now = Date.now();
+   863→        if (now - lastIframeSeekRef.current < 500) return;
+   864→        lastIframeSeekRef.current = now;
+   865→        sendIframeCommand('seek', Math.round(targetTime));
+   866→      }
+   867→    }, 1000);
+   868→
+   869→    return () => clearInterval(interval);
+   870→  }, [watchPartySync?.isHost, watchPartySync?.hostCurrentTime, watchPartySync?.hostIsPlaying, sendIframeCommand, reloadIframeAtTime]);
+   871→
+   872→  // ── Watch Party: Member play/pause matching ───────────────
+   873→  useEffect(() => {
+   874→    if (!watchPartySync || watchPartySync.isHost) return;
+   875→    if (!initialSyncDoneRef.current) return;
+   876→
+   877→    if (watchPartySync.hostIsPlaying && !iframePlayingRef.current) {
+   878→      sendIframeCommand('play');
+   879→    } else if (!watchPartySync.hostIsPlaying && iframePlayingRef.current) {
+   880→      sendIframeCommand('pause');
+   881→    }
+   882→  }, [watchPartySync?.hostIsPlaying, watchPartySync?.isHost, sendIframeCommand]);
+   883→
+   884→  // ── Watch Party: Member react to remote pause/play ───────
+   885→  const prevPausedByRef = useRef<string | null>(null);
+   886→  useEffect(() => {
+   887→    if (!watchPartySync) return;
+   888→    const prev = prevPausedByRef.current;
+   889→
+   890→    if (watchPartySync.pausedBy && !prev) {
+   891→      sendIframeCommand('pause');
+   892→    }
+   893→    if (!watchPartySync.pausedBy && prev) {
+   894→      sendIframeCommand('play');
+   895→    }
+   896→    prevPausedByRef.current = watchPartySync.pausedBy;
+   897→  }, [watchPartySync?.pausedBy, sendIframeCommand]);
+   898→
+   899→  const wakeLockRef = useRef<(() => void) | null>(null);
+   900→
+   901→  // Orientation lock + wake lock when iframe content loads
+   902→  useEffect(() => {
+   903→    if (!iframeLoadedRef.current) return;
+   904→    const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+   905→    if (!isMobile) return;
+   906→    lockOrientation('landscape').catch(() => {});
+   907→    requestWakeLock().then((release) => {
+   908→      wakeLockRef.current = release;
+   909→    });
+   910→    return () => {
+   911→      unlockOrientation();
+   912→      if (wakeLockRef.current) {
+   913→        wakeLockRef.current();
+   914→        wakeLockRef.current = null;
+   915→      }
+   916→    };
+   917→  }, [currentSrc]);
+   918→
+   919→  // Detect touch device — on mobile, overlay stays visible (back/fullscreen
+   920→  // at top don't overlap with embed's quality controls at bottom).
+   921→  // On desktop, overlay auto-hides (mousemove brings it back).
+   922→  const isTouchDevice = useRef(false);
+   923→
+   924→  // Auto-hide overlay after 3 seconds (desktop only via mousemove)
+   925→  const resetHideTimer = useCallback(() => {
+   926→    setShowOverlay(true);
+   927→    if (isTouchDevice.current) return; // Don't auto-hide on touch devices
+   928→    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+   929→    hideTimerRef.current = setTimeout(() => {
+   930→      setShowOverlay(false);
+   931→      setShowServerMenu(false);
+   932→    }, 3000);
+   933→  }, []);
+   934→
+   935→  useEffect(() => {
+   936→    // Detect touch capability once
+   937→    isTouchDevice.current = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+   938→
+   939→    queueMicrotask(() => {
+   940→      setShowOverlay(true);
+   941→    });
+   942→    // On touch devices, overlay stays forever — no auto-hide timer
+   943→    if (!isTouchDevice.current) {
+   944→      hideTimerRef.current = setTimeout(() => {
+   945→        setShowOverlay(false);
+   946→      }, 3000);
+   947→    }
+   948→    return () => {
+   949→      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+   950→      if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+   951→      if (verificationTimeoutRef.current) clearTimeout(verificationTimeoutRef.current);
+   952→      if (wakeLockRef.current) {
+   953→        wakeLockRef.current();
+   954→        wakeLockRef.current = null;
+   955→      }
+   956→      unlockOrientation();
+   957→    };
+   958→  }, []);
+   959→
+   960→  return (
+   961→    <div
+   962→      ref={setContainerRef}
+   963→      className="fixed inset-0 z-[100] bg-black overflow-hidden"
+   964→      style={cssFullscreen ? {
+   965→        zIndex: 2147483647,
+   966→        width: '100dvw',
+   967→        height: '100dvh',
+   968→      } : undefined}
+   969→      onMouseMove={resetHideTimer}
+   970→    >
+   971→      {/* Error state - all sources failed */}
+   972→      <AnimatePresence>
+   973→        {hasError && (
+   974→          <motion.div
+   975→            className="absolute inset-0 z-[120] flex flex-col items-center justify-center gap-4 bg-black/90"
+   976→            initial={{ opacity: 0 }}
+   977→            animate={{ opacity: 1 }}
+   978→            exit={{ opacity: 0 }}
+   979→          >
+   980→            <AlertCircle className="h-14 w-14 text-sv-red" />
+   981→            <p className="text-white/80 text-sm max-w-xs text-center px-4">
+   982→              Unable to load this content. All sources failed — it may not be available right now.
+   983→            </p>
+   984→            <div className="flex flex-col gap-2.5 items-center">
+   985→              <div className="flex gap-3">
+   986→                <button
+   987→                  onClick={() => {
+   988→                    if (allUrls.length === 0) return;
+   989→                    currentIndexRef.current = 0;
+   990→                    setCurrentSrc(allUrls[0]);
+   991→                    setCurrentLabel(getProviderLabel(allUrls[0]) || 'Source');
+   992→                    setHasError(false);
+   993→                    setIsTrying(true);
+   994→                    iframeLoadedRef.current = false;
+   995→                    playbackVerifiedRef.current = false;
+   996→                  }}
+   997→                  className="px-5 py-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-sm font-medium transition-colors cursor-pointer"
+   998→                >
+   999→                  Retry
+  1000→                </button>
+  1001→                <button
+  1002→                  onClick={onClose}
+  1003→                  className="px-5 py-2.5 rounded-lg bg-sv-red hover:bg-sv-red-hover text-white text-sm font-medium transition-colors cursor-pointer"
+  1004→                >
+  1005→                  Go Back
+  1006→                </button>
+  1007→              </div>
+  1008→              {title && (
+  1009→                <button
+  1010→                  onClick={() => {
+  1011→                    const searchSuffix = mediaType === 'tv' ? 'series' : 'full movie';
+  1012→                    const query = encodeURIComponent(`${title} ${searchSuffix}`);
+  1013→                    window.open(`https://www.youtube.com/results?search_query=${query}`, '_blank');
+  1014→                  }}
+  1015→                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#FF0000]/15 hover:bg-[#FF0000]/25 text-red-400 hover:text-red-300 text-xs font-medium transition-colors cursor-pointer"
+  1016→                >
+  1017→                  <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current">
+  1018→                    <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814z"/>
+  1019→                    <path fill="#fff" d="M9.545 15.568V8.432L15.818 12z"/>
+  1020→                  </svg>
+  1021→                  Search on YouTube
+  1022→                  <ExternalLink className="h-3 w-3" />
+  1023→                </button>
+  1024→              )}
+  1025→            </div>
+  1026→          </motion.div>
+  1027→        )}
+  1028→      </AnimatePresence>
+  1029→
+  1030→      {/* No loading spinner — embed providers have their own native loading UI.
+  1031→          Showing our spinner on top causes double loading indicators. */}
+  1032→
+  1033→      {/* Source cycling is silent — no skip button shown */}
+  1034→
+  1035→      {/* Watch Party pause notification */}
+  1036→      {watchPartySync?.pauseNotification && (
+  1037→        <motion.div
+  1038→          key={watchPartySync.pauseNotification.currentTime}
+  1039→          initial={{ opacity: 0, y: 20 }}
+  1040→          animate={{ opacity: 1, y: 0 }}
+  1041→          exit={{ opacity: 0, y: 20 }}
+  1042→          className="absolute bottom-20 left-1/2 -translate-x-1/2 z-[110] bg-black/80 backdrop-blur-md text-white text-xs font-medium px-4 py-2 rounded-full"
+  1043→        >
+  1044→          Paused by {watchPartySync.pauseNotification.pausedByName}
+  1045→        </motion.div>
+  1046→      )}
+  1047→
+  1048→      {/* Iframe — loads embed URL directly (not through proxy).
+  1049→          Direct loading preserves the embed's origin so Cloudflare JS,
+  1050→          cookies, and the player's API calls all work correctly.
+  1051→          This works in both browser and PWA standalone mode. */}
+  1052→      <iframe
+  1053→        key={currentSrc}
+  1054→        ref={iframeRef}
+  1055→        src={currentSrc}
+  1056→        className="absolute inset-0 h-full w-full border-0"
+  1057→        sandbox={currentSrc.includes('vidapi.ru') || currentSrc.includes('vaplayer.ru') ? 'allow-scripts allow-same-origin' : undefined}
+  1058→        allow="autoplay; encrypted-media; picture-in-picture; fullscreen"
+  1059→        referrerPolicy="origin"
+  1060→        title={iframeTitle || 'Video Player'}
+  1061→        onLoad={handleIframeLoad}
+  1062→        onError={() => {
+  1063→          tryNextSource();
+  1064→        }}
+  1065→      />
+  1066→
+  1067→      {/* Title + controls overlay — shows on tap, auto-hides after 3s
+  1068→          on desktop. Stays visible on touch devices. */}
+  1069→      <AnimatePresence>
+  1070→        {showOverlay && !isTrying && (
+  1071→          <motion.div
+  1072→            className="absolute top-0 left-0 right-0 z-[115]"
+  1073→            initial={{ opacity: 0 }}
+  1074→            animate={{ opacity: 1 }}
+  1075→            exit={{ opacity: 0 }}
+  1076→            transition={{ duration: 0.25 }}
+  1077→          >
+  1078→            {/* Gradient backdrop for readability */}
+  1079→            <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-black/30 to-transparent pointer-events-none" style={{ height: '120px' }} />
+  1080→
+  1081→            {/* Click-away dismiss for server menu — inside overlay stacking context
+  1082→                so dropdown (z-[120]) renders above this (z-[110]) */}
+  1083→            {showServerMenu && (
+  1084→              <div
+  1085→                className="absolute inset-0 z-[110]"
+  1086→                onClick={() => setShowServerMenu(false)}
+  1087→              />
+  1088→            )}
+  1089→
+  1090→            {/* Top bar: back + controls */}
+  1091→            <div
+  1092→              className="relative flex items-center justify-between px-3 z-[111]"
+  1093→              style={{ paddingTop: 'max(0.75rem, calc(env(safe-area-inset-top, 0px) + 0.25rem))' }}
+  1094→            >
+  1095→              {/* Back button */}
+  1096→              <button
+  1097→                onClick={onClose}
+  1098→                className="flex items-center justify-center min-h-[40px] min-w-[40px] text-white/90 hover:text-white transition-colors rounded-full hover:bg-white/10"
+  1099→                aria-label="Go back"
+  1100→              >
+  1101→                <ArrowLeft className="h-5 w-5" />
+  1102→              </button>
+  1103→
+  1104→              {/* Spacer — title removed per user request */}
+  1105→              <div className="flex-1" />
+  1106→
+  1107→              {/* Server switcher + Fullscreen */}
+  1108→              <div className="flex items-center gap-1.5">
+  1109→                {/* Server switcher — clean pill, only provider name */}
+  1110→                {hasMultipleProviders && (
+  1111→                  <div className="relative">
+  1112→                    <button
+  1113→                      onClick={() => setShowServerMenu((prev) => !prev)}
+  1114→                      className={cn(
+  1115→                        'flex items-center gap-1.5 h-8 px-3 rounded-full text-[11px] font-semibold tracking-wide transition-all duration-200',
+  1116→                        'bg-white/[0.1] hover:bg-white/[0.18] border border-white/[0.06]',
+  1117→                        'text-white/90 hover:text-white active:scale-95',
+  1118→                        showServerMenu && 'bg-white/[0.18] border-white/[0.12] text-white',
+  1119→                      )}
+  1120→                      aria-label="Switch server"
+  1121→                    >
+  1122→                      <span className="truncate max-w-[72px]">{currentLabel}</span>
+  1123→                      <ChevronDown className={cn(
+  1124→                        'h-3 w-3 text-white/50 transition-transform duration-200 flex-shrink-0',
+  1125→                        showServerMenu && 'rotate-180',
+  1126→                      )} />
+  1127→                    </button>
+  1128→
+  1129→                    {/* Server dropdown — deduplicated providers only */}
+  1130→                    <AnimatePresence>
+  1131→                      {showServerMenu && (
+  1132→                        <motion.div
+  1133→                          className="absolute top-full right-0 mt-2 w-40 rounded-2xl bg-[#1a1a1a]/95 backdrop-blur-xl border border-white/[0.08] shadow-2xl shadow-black/60 z-[120] py-1 overflow-hidden"
+  1134→                          initial={{ opacity: 0, y: -4, scale: 0.97 }}
+  1135→                          animate={{ opacity: 1, y: 0, scale: 1 }}
+  1136→                          exit={{ opacity: 0, y: -4, scale: 0.97 }}
+  1137→                          transition={{ duration: 0.15, ease: [0.32, 0.72, 0, 1] }}
+  1138→                        >
+  1139→                          {uniqueProviders.map((provider, i) => {
+  1140→                            const isActive = provider.label === currentLabel;
+  1141→                            return (
+  1142→                              <button
+  1143→                                key={provider.label}
+  1144→                                onClick={() => switchToSource(provider.urlIndex)}
+  1145→                                className={cn(
+  1146→                                  'w-full flex items-center gap-2.5 px-3.5 py-2.5 text-left transition-all duration-150',
+  1147→                                  isActive
+  1148→                                    ? 'bg-sv-red/20 text-white'
+  1149→                                    : 'text-white/50 hover:text-white hover:bg-white/[0.06]',
+  1150→                                )}
+  1151→                              >
+  1152→                                <span className={cn(
+  1153→                                  'w-1.5 h-1.5 rounded-full flex-shrink-0 transition-colors',
+  1154→                                  isActive ? 'bg-sv-red' : 'bg-white/15',
+  1155→                                )} />
+  1156→                                <span className="flex-1 text-[13px] font-medium truncate">
+  1157→                                  {provider.label}
+  1158→                                </span>
+  1159→                              </button>
+  1160→                            );
+  1161→                          })}
+  1162→                        </motion.div>
+  1163→                      )}
+  1164→                    </AnimatePresence>
+  1165→                  </div>
+  1166→                )}
+  1167→
+  1168→                {/* Fullscreen button */}
+  1169→                <button
+  1170→                  onClick={toggleFullscreen}
+  1171→                  className="flex items-center justify-center min-h-[40px] min-w-[40px] text-white/90 hover:text-white transition-colors rounded-full hover:bg-white/10"
+  1172→                  aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+  1173→                >
+  1174→                  {isFullscreen ? <Minimize className="h-5 w-5" /> : <Maximize className="h-5 w-5" />}
+  1175→                </button>
+  1176→              </div>
+  1177→            </div>
+  1178→          </motion.div>
+  1179→        )}
+  1180→      </AnimatePresence>
+  1181→
+  1182→      {/* Fullscreen speaking indicator — shows username + mic icon on right side */}
+  1183→      {watchPartySync && isFullscreen && (watchPartySync.isPttActive || (watchPartySync.talkingMembers && watchPartySync.talkingMembers.size > 0)) && (
+  1184→        <FullscreenSpeakingIndicator
+  1185→          isPttActive={watchPartySync.isPttActive ?? false}
+  1186→          talkingMembers={watchPartySync.talkingMembers}
+  1187→          members={watchPartySync.members}
+  1188→          localUserId={watchPartySync.localUserId}
+  1189→        />
+  1190→      )}
+  1191→
+  1192→
+  1193→    </div>
+  1194→  );
+  1195→}
+  1196→
+  1197→// ─── HLS / Direct Video Player ───────────────────────────────────────────────
+  1198→
+  1199→function HlsVideoPlayer({
+  1200→  src,
+  1201→  poster,
+  1202→  title,
+  1203→  startTime = 0,
+  1204→  onClose,
+  1205→  onProgressUpdate,
+  1206→  onCompleted,
+  1207→  autoPlay,
+  1208→  onFatalError,
+  1209→  subtitleUrls,
+  1210→  subtitleTracks,
+  1211→  useHls,
+  1212→  hlsPlaybackId,
+  1213→  fmp4Blob,
+  1214→  watchPartySync,
+  1215→}: VideoPlayerProps & { onFatalError?: () => void }) {
+  1216→  // Refs
+  1217→  const containerRef = useRef<HTMLDivElement>(null);
+  1218→  const videoRef = useRef<HTMLVideoElement>(null);
+  1219→  const hlsRef = useRef<Hls | null>(null);
+  1220→  const mseRef = useRef<ProgressiveMseHandle | null>(null);
+  1221→  const hideControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  1222→  const progressTrackerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  1223→  const lastTapRef = useRef<{ time: number; x: number }>({ time: 0, x: 0 });
+  1224→  const seekingRef = useRef(false);
+  1225→
+  1226→  // Whether to use the custom in-memory loader (bypasses blob URLs and XHR)
+  1227→  const useMemoryLoader = !!hlsPlaybackId;
+  1228→  // Whether to use MSE-based playback for fMP4 blobs
+  1229→  const useMse = !!fmp4Blob;
+  1230→
+  1231→  // State
+  1232→  const [playing, setPlaying] = useState(false);
+  1233→  const [currentTime, setCurrentTime] = useState(0);
+  1234→  const [duration, setDuration] = useState(0);
+  1235→  const [buffered, setBuffered] = useState(0);
+  1236→  const [volume, setVolume] = useState(1);
+  1237→  const [muted, setMuted] = useState(false);
+  1238→  // fullscreen state is provided by useFullscreen hook below (handles webkit for iOS Safari)
+  1239→  const [pip, setPip] = useState(false);
+  1240→  const [playbackRate, setPlaybackRate] = useState(1);
+  1241→  const [showControls, setShowControls] = useState(true);
+  1242→  const [loading, setLoading] = useState(true);
+  1243→  const [error, setError] = useState<string | null>(null);
+  1244→  const [hoverTime, setHoverTime] = useState<number | null>(null);
+  1245→  const [hoverPosition, setHoverPosition] = useState(0);
+  1246→  const [isDraggingProgress, setIsDraggingProgress] = useState(false);
+  1247→  const [showSpeedMenu, setShowSpeedMenu] = useState(false);
+  1248→  const [showQualityMenu, setShowQualityMenu] = useState(false);
+  1249→  const [showVolumeSlider, setShowVolumeSlider] = useState(false);
+  1250→
+  1251→  const [qualityLevels, setQualityLevels] = useState<HlsLevel[]>([]);
+  1252→  const [currentQuality, setCurrentQuality] = useState(-1); // -1 = auto
+  1253→  const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+  1254→
+  1255→  // Full screen & wake lock
+  1256→  const { isFullscreen: fullscreen, toggleFullscreen: toggleFs, ref: fullscreenRef } = useFullscreen();
+  1257→  const wakeLockRef = useRef<(() => void) | null>(null);
+  1258→
+  1259→  const isHls = !useMse && (!!useHls || src.includes('.m3u8'));
+  1260→
+  1261→  // ── Watch Party Sync ──────────────────────────────────────
+  1262→  // Ref to avoid stale closure in togglePlay/seekTo callbacks
+  1263→  const wpSyncRef = useRef(watchPartySync);
+  1264→  wpSyncRef.current = watchPartySync;
+  1265→
+  1266→  // Lock playback controls for non-host members (play/pause, seek)
+  1267→  const isMemberLocked = !!(watchPartySync && !watchPartySync.isHost);
+  1268→
+  1269→  // Track previous pausedBy to detect remote pause/play changes
+  1270→  const prevPausedByRef = useRef<string | null>(null);
+  1271→
+  1272→  // React to remote pause/play from watch party
+  1273→  useEffect(() => {
+  1274→    if (!watchPartySync) return;
+  1275→    const video = videoRef.current;
+  1276→    if (!video) return;
+  1277→
+  1278→    // Someone paused → pause locally
+  1279→    if (watchPartySync.pausedBy && !prevPausedByRef.current) {
+  1280→      video.pause();
+  1281→    }
+  1282→    // Pause released → resume locally (only if not the one who paused)
+  1283→    if (!watchPartySync.pausedBy && prevPausedByRef.current) {
+  1284→      video.play().catch(() => {});
+  1285→    }
+  1286→    prevPausedByRef.current = watchPartySync.pausedBy;
+  1287→  }, [watchPartySync?.pausedBy]);
+  1288→
+  1289→  // Periodic sync: host sends current state every 250ms for tighter member sync
+  1290→  useEffect(() => {
+  1291→    if (!watchPartySync?.isHost) return;
+  1292→    const interval = setInterval(() => {
+  1293→      const video = videoRef.current;
+  1294→      if (!video) return;
+  1295→      watchPartySync.onSync(video.currentTime, !video.paused, video.duration || 0);
+  1296→    }, 250);
+  1297→    return () => clearInterval(interval);
+  1298→  }, [watchPartySync?.isHost, watchPartySync?.onSync]);
+  1299→
+  1300→  // Member sync: correct drift by seeking to host's position.
+  1301→  //
+  1302→  // Two mechanisms work together:
+  1303→  //   1. Effect-based: triggers when hostCurrentTime prop changes (from broadcast)
+  1304→  //   2. Interval-based: polls every 750ms to catch drift even if broadcasts
+  1305→  //      are delayed (REST fallback, network issues). This prevents members from
+  1306→  //      drifting significantly between host sync broadcasts.
+  1307→  //
+  1308→  // Sync strategy (tuned for near-identical sync):
+  1309→  //   - Latency compensation: uses sentAt timestamp from the sync broadcast
+  1310→  //     to calculate actual one-way network latency, replacing the previous
+  1311→  //     hardcoded 0.25s guess. This gives accurate compensation on both fast
+  1312→  //     (LAN) and slow (cellular) connections.
+  1313→  //   - Threshold: 0.2s — tighter correction window
+  1314→  //   - Throttle: one correction per 300ms to avoid seek wars
+  1315→  //   - Emergency: if drift exceeds 1.0s, seek immediately (bypass throttle)
+  1316→  //   - Speed adjustment: for drift under 0.2s, adjust playback rate
+  1317→  //     aggressively to catch up/slow down without a jarring seek
+  1318→  //   - Play/pause matching on every correction
+  1319→  const lastSeekTimeRef = useRef(0);
+  1320→
+  1321→  // Helper: calculate dynamic latency offset from sync broadcast's sentAt.
+  1322→  const calcHlsLatencyOffset = useCallback((sentAt?: number) => {
+  1323→    if (!sentAt) return 0.25;
+  1324→    const raw = (Date.now() - sentAt) / 1000;
+  1325→    return Math.max(0.05, Math.min(raw, 2));
+  1326→  }, []);
+  1327→
+  1328→  // Effect-based drift correction (triggers on prop change)
+  1329→  useEffect(() => {
+  1330→    if (!watchPartySync || watchPartySync.isHost) return;
+  1331→    if (watchPartySync.hostCurrentTime === undefined || watchPartySync.hostCurrentTime === null) return;
+  1332→    const video = videoRef.current;
+  1333→    if (!video || !video.duration || video.duration === Infinity) return;
+  1334→
+  1335→    const hostTime = watchPartySync.hostCurrentTime;
+  1336→    // Compensated target: where the host IS NOW (not where it was when broadcast)
+  1337→    const latencyOffset = calcHlsLatencyOffset(watchPartySync.lastSyncSentAt);
+  1338→    const targetTime = Math.min(hostTime + latencyOffset, video.duration - 0.1);
+  1339→    const drift = Math.abs(video.currentTime - targetTime);
+  1340→    const SYNC_THRESHOLD = 0.2; // seconds — tighter for near-identical sync
+  1341→    const EMERGENCY_THRESHOLD = 1.0; // seconds — immediate seek
+  1342→    const THROTTLE_MS = 300; // ms — minimum between seeks
+  1343→
+  1344→    if (drift > EMERGENCY_THRESHOLD) {
+  1345→      // Emergency correction — bypass throttle for large drifts
+  1346→      video.currentTime = targetTime;
+  1347→      lastSeekTimeRef.current = Date.now();
+  1348→
+  1349→      // Also match play/pause state from host
+  1350→      if (watchPartySync.hostIsPlaying && video.paused) {
+  1351→        video.play().catch(() => {});
+  1352→      } else if (!watchPartySync.hostIsPlaying && !video.paused) {
+  1353→        video.pause();
+  1354→      }
+  1355→    } else if (drift > SYNC_THRESHOLD) {
+  1356→      // Throttle seeks: don't seek more than once per THROTTLE_MS
+  1357→      const now = Date.now();
+  1358→      if (now - lastSeekTimeRef.current < THROTTLE_MS) return;
+  1359→      lastSeekTimeRef.current = now;
+  1360→
+  1361→      video.currentTime = targetTime;
+  1362→
+  1363→      // Also match play/pause state from host
+  1364→      if (watchPartySync.hostIsPlaying && video.paused) {
+  1365→        video.play().catch(() => {});
+  1366→      } else if (!watchPartySync.hostIsPlaying && !video.paused) {
+  1367→        video.pause();
+  1368→      }
+  1369→    } else if (drift > 0.08 && watchPartySync.hostIsPlaying && !video.paused) {
+  1370→      // Small drift while playing — speed up/down to catch up gradually
+  1371→      // instead of seeking (which causes a visible jump).
+  1372→      // More aggressive coefficient (0.1 vs previous 0.06) for faster convergence.
+  1373→      const behind = targetTime - video.currentTime;
+  1374→      if (behind > 0) {
+  1375→        video.playbackRate = Math.min(1.15, 1 + behind * 0.1);
+  1376→      } else {
+  1377→        video.playbackRate = Math.max(0.85, 1 + behind * 0.1);
+  1378→      }
+  1379→    }
+  1380→  }, [watchPartySync?.hostCurrentTime, watchPartySync?.hostIsPlaying, watchPartySync?.isHost, watchPartySync?.lastSyncSentAt, calcHlsLatencyOffset]);
+  1381→
+  1382→  // Interval-based drift correction for members (polls every 750ms)
+  1383→  useEffect(() => {
+  1384→    if (!watchPartySync || watchPartySync.isHost) return;
+  1385→    const sync = watchPartySync;
+  1386→
+  1387→    const interval = setInterval(() => {
+  1388→      const video = videoRef.current;
+  1389→      if (!video || !video.duration || video.duration === Infinity) return;
+  1390→      if (sync.hostCurrentTime === undefined || sync.hostCurrentTime === null) return;
+  1391→      if (!sync.hostIsPlaying) return; // Only correct drift while playing
+  1392→
+  1393→      const latencyOffset = calcHlsLatencyOffset(sync.lastSyncSentAt);
+  1394→      const targetTime = Math.min(sync.hostCurrentTime + latencyOffset, video.duration - 0.1);
+  1395→      const drift = video.currentTime - targetTime;
+  1396→
+  1397→      if (Math.abs(drift) > 1.0) {
+  1398→        // Emergency correction — bypass throttle for large drifts
+  1399→        video.currentTime = targetTime;
+  1400→      } else if (Math.abs(drift) > 0.2) {
+  1401→        const now = Date.now();
+  1402→        if (now - lastSeekTimeRef.current < 300) return;
+  1403→        lastSeekTimeRef.current = now;
+  1404→        video.currentTime = targetTime;
+  1405→      } else if (Math.abs(drift) > 0.08) {
+  1406→        // Gradual speed adjustment (stronger coefficients for faster convergence)
+  1407→        video.playbackRate = drift > 0
+  1408→          ? Math.max(0.85, 1 + drift * 0.1)
+  1409→          : Math.min(1.15, 1 + drift * 0.1);
+  1410→      } else {
+  1411→        // Close enough — reset to normal speed
+  1412→        if (video.playbackRate !== 1) video.playbackRate = 1;
+  1413→      }
+  1414→    }, 750);
+  1415→
+  1416→    return () => clearInterval(interval);
+  1417→  }, [watchPartySync?.isHost, watchPartySync?.hostCurrentTime, watchPartySync?.hostIsPlaying, watchPartySync?.lastSyncSentAt, calcHlsLatencyOffset]);
+  1418→
+  1419→  // Reset playback rate when not in a watch party or when becoming host
+  1420→  useEffect(() => {
+  1421→    if (!watchPartySync || watchPartySync.isHost) {
+  1422→      const video = videoRef.current;
+  1423→      if (video && video.playbackRate !== 1) {
+  1424→        video.playbackRate = 1;
+  1425→      }
+  1426→    }
+  1427→  }, [watchPartySync?.isHost]);
+  1428→
+  1429→  // Derived
+  1430→  const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
+  1431→  const bufferedPercent = duration > 0 ? (buffered / duration) * 100 : 0;
+  1432→  const VolumeIcon = muted || volume === 0 ? VolumeX : volume < 0.5 ? Volume1 : Volume2;
+  1433→
+  1434→  // Controls auto-hide
+  1435→  const resetHideTimer = useCallback(() => {
+  1436→    setShowControls(true);
+  1437→    if (hideControlsTimerRef.current) clearTimeout(hideControlsTimerRef.current);
+  1438→    hideControlsTimerRef.current = setTimeout(() => {
+  1439→      if (!showSpeedMenu && !showQualityMenu && !showVolumeSlider) {
+  1440→        setShowControls(false);
+  1441→        setShowVolumeSlider(false);
+  1442→        setShowSpeedMenu(false);
+  1443→        setShowQualityMenu(false);
+  1444→      }
+  1445→    }, 3000);
+  1446→  }, [showSpeedMenu, showQualityMenu, showVolumeSlider]);
+  1447→
+  1448→  const handleMouseMove = useCallback(() => {
+  1449→    resetHideTimer();
+  1450→  }, [resetHideTimer]);
+  1451→
+  1452→  // Play / Pause
+  1453→  const togglePlay = useCallback(() => {
+  1454→    if (isMemberLocked) return;
+  1455→    const video = videoRef.current;
+  1456→    if (!video) return;
+  1457→    if (video.paused) {
+  1458→      // User gesture — unmute if browser auto-muted for autoplay policy
+  1459→      if (video.muted) {
+  1460→        video.muted = false;
+  1461→        setMuted(false);
+  1462→      }
+  1463→      video.play().catch(() => {});
+  1464→      // Watch Party: notify play
+  1465→      wpSyncRef.current?.onPlay(video.currentTime);
+  1466→    } else {
+  1467→      video.pause();
+  1468→      // Watch Party: notify pause
+  1469→      wpSyncRef.current?.onPause(video.currentTime);
+  1470→    }
+  1471→  }, []);
+  1472→
+  1473→  // Seek
+  1474→  const seekTo = useCallback((time: number) => {
+  1475→    if (isMemberLocked) return;
+  1476→    const video = videoRef.current;
+  1477→    if (!video) return;
+  1478→    video.currentTime = Math.max(0, Math.min(time, video.duration || 0));
+  1479→    // Watch Party: notify seek
+  1480→    wpSyncRef.current?.onSeek(video.currentTime);
+  1481→  }, []);
+  1482→
+  1483→  const seekBy = useCallback((delta: number) => {
+  1484→    // Read currentTime directly from video ref to avoid stale closure over React state.
+  1485→    // The state updates on ~250ms timeupdate interval — rapid key presses between
+  1486→    // updates would seek from a stale position.
+  1487→    const video = videoRef.current;
+  1488→    const now = video?.currentTime ?? currentTime;
+  1489→    seekTo(now + delta);
+  1490→  }, [currentTime, seekTo]);
+  1491→
+  1492→  // Volume
+  1493→  const toggleMute = useCallback(() => {
+  1494→    const video = videoRef.current;
+  1495→    if (!video) return;
+  1496→    video.muted = !video.muted;
+  1497→    setMuted(video.muted);
+  1498→  }, []);
+  1499→
+  1500→  const changeVolume = useCallback((v: number) => {
+  1501→    const video = videoRef.current;
+  1502→    if (!video) return;
+  1503→    const newVol = Math.max(0, Math.min(1, v));
+  1504→    video.volume = newVol;
+  1505→    setVolume(newVol);
+  1506→    if (newVol > 0 && video.muted) {
+  1507→      video.muted = false;
+  1508→      setMuted(false);
+  1509→    }
+  1510→  }, []);
+  1511→
+  1512→  // Toggle subtitle visibility by enabling/disabling text tracks
+  1513→  const toggleSubtitles = useCallback(() => {
+  1514→    const video = videoRef.current;
+  1515→    if (!video) return;
+  1516→    const tracks = video.textTracks;
+  1517→    const hasTracks = tracks && tracks.length > 0;
+  1518→    if (!hasTracks) return;
+  1519→
+  1520→    const newState = !subtitlesEnabled;
+  1521→    setSubtitlesEnabled(newState);
+  1522→    for (let i = 0; i < tracks.length; i++) {
+  1523→      tracks[i].mode = newState ? 'showing' : 'hidden';
+  1524→    }
+  1525→  }, [subtitlesEnabled]);
+  1526→
+  1527→  // Fullscreen — delegated to useFullscreen hook (handles webkit for iOS Safari)
+  1528→
+  1529→  // PiP
+  1530→  const togglePiP = useCallback(async () => {
+  1531→    const video = videoRef.current;
+  1532→    if (!video || !document.pictureInPictureEnabled) return;
+  1533→    try {
+  1534→      if (document.pictureInPictureElement) {
+  1535→        await document.exitPictureInPicture();
+  1536→      } else {
+  1537→        await video.requestPictureInPicture();
+  1538→      }
+  1539→    } catch {
+  1540→      // PiP not supported
+  1541→    }
+  1542→  }, []);
+  1543→
+  1544→  // Playback Speed
+  1545→  const changePlaybackRate = useCallback((rate: number) => {
+  1546→    const video = videoRef.current;
+  1547→    if (!video) return;
+  1548→    video.playbackRate = rate;
+  1549→    setPlaybackRate(rate);
+  1550→    setShowSpeedMenu(false);
+  1551→  }, []);
+  1552→
+  1553→  // Quality
+  1554→  const changeQuality = useCallback(
+  1555→    (index: number) => {
+  1556→      const hls = hlsRef.current;
+  1557→      if (!hls) return;
+  1558→      hls.currentLevel = index;
+  1559→      setCurrentQuality(index);
+  1560→      setShowQualityMenu(false);
+  1561→    },
+  1562→    [],
+  1563→  );
+  1564→
+  1565→  // Progress bar mouse handlers
+  1566→  const handleProgressMouseEnter = useCallback(() => {
+  1567→    setIsDraggingProgress(true);
+  1568→  }, []);
+  1569→
+  1570→  const handleProgressMouseMove = useCallback(
+  1571→    (e: ReactMouseEvent<HTMLDivElement>) => {
+  1572→      const rect = e.currentTarget.getBoundingClientRect();
+  1573→      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+  1574→      const percent = x / rect.width;
+  1575→      setHoverTime(percent * duration);
+  1576→      setHoverPosition(percent * 100);
+  1577→    },
+  1578→    [duration],
+  1579→  );
+  1580→
+  1581→  const handleProgressMouseLeave = useCallback(() => {
+  1582→    setIsDraggingProgress(false);
+  1583→    setHoverTime(null);
+  1584→  }, []);
+  1585→
+  1586→  const handleProgressClick = useCallback(
+  1587→    (e: ReactMouseEvent<HTMLDivElement>) => {
+  1588→      if (isMemberLocked) return;
+  1589→      const rect = e.currentTarget.getBoundingClientRect();
+  1590→      const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+  1591→      const percent = x / rect.width;
+  1592→      seekTo(percent * duration);
+  1593→    },
+  1594→    [duration, seekTo, isMemberLocked],
+  1595→  );
+  1596→
+  1597→  // Double-tap
+  1598→  const handleTap = useCallback(
+  1599→    (e: ReactTouchEvent<HTMLDivElement> | ReactMouseEvent<HTMLDivElement>) => {
+  1600→      const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+  1601→      const now = Date.now();
+  1602→      const last = lastTapRef.current;
+  1603→
+  1604→      if (now - last.time < 300 && Math.abs(clientX - last.x) < 100) {
+  1605→        // Double-tap detected — block for members
+  1606→        if (isMemberLocked) {
+  1607→          lastTapRef.current = { time: 0, x: 0 };
+  1608→          return;
+  1609→        }
+  1610→        const screenWidth = window.innerWidth;
+  1611→        const isLeftSide = clientX < screenWidth * 0.4;
+  1612→
+  1613→        if (isLeftSide) {
+  1614→          seekBy(-10);
+  1615→        } else {
+  1616→          seekBy(10);
+  1617→        }
+  1618→
+  1619→        lastTapRef.current = { time: 0, x: 0 };
+  1620→      } else {
+  1621→        lastTapRef.current = { time: now, x: clientX };
+  1622→      }
+  1623→    },
+  1624→    [seekBy, isMemberLocked],
+  1625→  );
+  1626→
+  1627→  // Keyboard shortcuts
+  1628→  useEffect(() => {
+  1629→    const handleKeyDown = (e: KeyboardEvent) => {
+  1630→      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+  1631→
+  1632→      switch (e.key) {
+  1633→        case ' ':
+  1634→        case 'k':
+  1635→          if (isMemberLocked) return;
+  1636→          e.preventDefault();
+  1637→          togglePlay();
+  1638→          break;
+  1639→        case 'ArrowLeft':
+  1640→          if (isMemberLocked) return;
+  1641→          e.preventDefault();
+  1642→          seekBy(-10);
+  1643→          break;
+  1644→        case 'ArrowRight':
+  1645→          if (isMemberLocked) return;
+  1646→          e.preventDefault();
+  1647→          seekBy(10);
+  1648→          break;
+  1649→        case 'ArrowUp':
+  1650→          e.preventDefault();
+  1651→          changeVolume(volume + 0.1);
+  1652→          break;
+  1653→        case 'ArrowDown':
+  1654→          e.preventDefault();
+  1655→          changeVolume(volume - 0.1);
+  1656→          break;
+  1657→        case 'f':
+  1658→          e.preventDefault();
+  1659→          toggleFs();
+  1660→          break;
+  1661→        case 'm':
+  1662→          e.preventDefault();
+  1663→          toggleMute();
+  1664→          break;
+  1665→        case 'Escape':
+  1666→          if (document.fullscreenElement || (document as unknown as Record<string, Element | null>).webkitFullscreenElement) {
+  1667→            document.exitFullscreen?.().catch(() => {});
+  1668→          } else {
+  1669→            onClose();
+  1670→          }
+  1671→          break;
+  1672→      }
+  1673→      resetHideTimer();
+  1674→    };
+  1675→
+  1676→    window.addEventListener('keydown', handleKeyDown);
+  1677→    return () => window.removeEventListener('keydown', handleKeyDown);
+  1678→  }, [togglePlay, seekBy, changeVolume, toggleFs, toggleMute, onClose, resetHideTimer, volume, isMemberLocked]);
+  1679→
+  1680→  // Fullscreen change listener — delegated to useFullscreen hook
+  1681→
+  1682→  // PiP change listener
+  1683→  useEffect(() => {
+  1684→    const handlePiPChange = () => {
+  1685→      setPip(!!document.pictureInPictureElement);
+  1686→    };
+  1687→    document.addEventListener('leavepictureinpicture', handlePiPChange);
+  1688→    document.addEventListener('enterpictureinpicture', handlePiPChange);
+  1689→    return () => {
+  1690→      document.removeEventListener('leavepictureinpicture', handlePiPChange);
+  1691→      document.removeEventListener('enterpictureinpicture', handlePiPChange);
+  1692→    };
+  1693→  }, []);
+  1694→
+  1695→  // Video event handlers
+  1696→  useEffect(() => {
+  1697→    const video = videoRef.current;
+  1698→    if (!video) return;
+  1699→
+  1700→    const onPlay = () => {
+  1701→      setPlaying(true);
+  1702→      console.log(`[SV Player] PLAY — currentTime=${video.currentTime.toFixed(3)}s, duration=${video.duration?.toFixed(3)}s`);
+  1703→    };
+  1704→    const onPause = () => {
+  1705→      setPlaying(false);
+  1706→      console.log(`[SV Player] PAUSE — currentTime=${video.currentTime.toFixed(3)}s`);
+  1707→    };
+  1708→    const onTimeUpdate = () => {
+  1709→      if (!seekingRef.current) {
+  1710→        setCurrentTime(video.currentTime);
+  1711→      }
+  1712→    };
+  1713→    const onDurationChange = () => {
+  1714→      // Guard against Infinity/NaN — common with MSE before endOfStream().
+  1715→      // Without this, progress = (currentTime / Infinity) * 100 = 0 → bar never shows.
+  1716→      if (isFinite(video.duration) && video.duration > 0) {
+  1717→        setDuration(video.duration);
+  1718→      }
+  1719→      console.log(`[SV Player] DURATION_CHANGE — duration=${video.duration}`);
+  1720→    };
+  1721→    const onProgress = () => {
+  1722→      if (video.buffered.length > 0) {
+  1723→        setBuffered(video.buffered.end(video.buffered.length - 1));
+  1724→      }
+  1725→    };
+  1726→    const onWaiting = () => {
+  1727→      setLoading(true);
+  1728→      console.warn(
+  1729→        `[SV Player] WAITING (buffer stall) — currentTime=${video.currentTime.toFixed(3)}s, ` +
+  1730→        `buffered=${video.buffered.length > 0 ? video.buffered.end(video.buffered.length - 1).toFixed(3) : 'none'}s, ` +
+  1731→        `duration=${video.duration?.toFixed(3)}s`,
+  1732→      );
+  1733→
+  1734→      // ── Blob URL stall recovery ──────────────────────────────────────
+  1735→      // Chrome sometimes stalls on blob URL playback of fMP4 files — the
+  1736→      // video freezes but audio may continue, or both freeze. This happens
+  1737→      // because Chrome's media pipeline loses sync with the fragmented MP4
+  1738→      // box structure. A small seek (0.1s forward) forces Chrome to
+  1739→      // re-initialize the decoder at the new position, which often recovers.
+  1740→      //
+  1741→      // Only attempt recovery if:
+  1742→      // 1. The video appears to have data available (buffered ahead > 0)
+  1743→      // 2. We haven't already attempted recovery recently (5s cooldown)
+  1744→      // 3. The video is not genuinely at the end
+  1745→      if (video.src.startsWith('blob:') && !video.ended && video.duration > 0) {
+  1746→        const bufferedAhead = video.buffered.length > 0
+  1747→          ? video.buffered.end(video.buffered.length - 1) - video.currentTime
+  1748→          : 0;
+  1749→
+  1750→        if (bufferedAhead > 0.5) {
+  1751→          // Check cooldown — don't try recovery more than once every 5s
+  1752→          const now = Date.now();
+  1753→          const lastRecovery = (video as HTMLVideoElement & { _svLastStallRecovery?: number })._svLastStallRecovery ?? 0;
+  1754→          if (now - lastRecovery > 5000) {
+  1755→            (video as HTMLVideoElement & { _svLastStallRecovery?: number })._svLastStallRecovery = now;
+  1756→            console.log(`[SV Player] Attempting blob URL stall recovery — seeking +0.1s from ${video.currentTime.toFixed(3)}s`);
+  1757→            const targetTime = video.currentTime + 0.1;
+  1758→            video.currentTime = targetTime;
+  1759→            // If seeking doesn't help, try play() again after a short delay
+  1760→            setTimeout(() => {
+  1761→              if (video.paused && !video.ended) {
+  1762→                video.play().catch(() => {});
+  1763→              }
+  1764→            }, 500);
+  1765→          }
+  1766→        }
+  1767→      }
+  1768→    };
+  1769→    const onCanPlay = () => setLoading(false);
+  1770→    const onError = () => {
+  1771→      const videoEl = videoRef.current;
+  1772→      const mediaErr = videoEl?.error;
+  1773→      // Log detailed error info for diagnostics
+  1774→      if (mediaErr) {
+  1775→        const errorNames: Record<number, string> = {
+  1776→          1: 'MEDIA_ERR_ABORTED',
+  1777→          2: 'MEDIA_ERR_NETWORK',
+  1778→          3: 'MEDIA_ERR_DECODE',
+  1779→          4: 'MEDIA_ERR_SRC_NOT_SUPPORTED',
+  1780→        };
+  1781→        console.error(
+  1782→          `[SV Player] Video error: code=${mediaErr.code} (${errorNames[mediaErr.code] || 'UNKNOWN'}), ` +
+  1783→          `message='${mediaErr.message || 'N/A'}', ` +
+  1784→          `currentTime=${video.currentTime.toFixed(3)}s, src=${video.src.substring(0, 60)}...`,
+  1785→        );
+  1786→      }
+  1787→      setError('Failed to load video. Please check the source and try again.');
+  1788→      setLoading(false);
+  1789→    };
+  1790→    const onVolumeChange = () => {
+  1791→      setVolume(video.volume);
+  1792→      setMuted(video.muted);
+  1793→    };
+  1794→    const onEnded = () => {
+  1795→      console.log(`[SV Player] ENDED — duration=${video.duration?.toFixed(3)}s`);
+  1796→      if (onCompleted) {
+  1797→        onCompleted();
+  1798→      }
+  1799→    };
+  1800→    const onStalled = () => {
+  1801→      console.warn(`[SV Player] STALLED — data transfer stalled at currentTime=${video.currentTime.toFixed(3)}s`);
+  1802→    };
+  1803→    const onSuspend = () => {
+  1804→      console.log(`[SV Player] SUSPEND — media download suspended at currentTime=${video.currentTime.toFixed(3)}s`);
+  1805→    };
+  1806→    const onEmptied = () => {
+  1807→      console.warn(`[SV Player] EMPTIED — media resource emptied`);
+  1808→    };
+  1809→
+  1810→    video.addEventListener('play', onPlay);
+  1811→    video.addEventListener('pause', onPause);
+  1812→    video.addEventListener('timeupdate', onTimeUpdate);
+  1813→    video.addEventListener('durationchange', onDurationChange);
+  1814→    video.addEventListener('progress', onProgress);
+  1815→    video.addEventListener('waiting', onWaiting);
+  1816→    video.addEventListener('canplay', onCanPlay);
+  1817→    video.addEventListener('error', onError);
+  1818→    video.addEventListener('volumechange', onVolumeChange);
+  1819→    video.addEventListener('ended', onEnded);
+  1820→    video.addEventListener('stalled', onStalled);
+  1821→    video.addEventListener('suspend', onSuspend);
+  1822→    video.addEventListener('emptied', onEmptied);
+  1823→
+  1824→    return () => {
+  1825→      video.removeEventListener('play', onPlay);
+  1826→      video.removeEventListener('pause', onPause);
+  1827→      video.removeEventListener('timeupdate', onTimeUpdate);
+  1828→      video.removeEventListener('durationchange', onDurationChange);
+  1829→      video.removeEventListener('progress', onProgress);
+  1830→      video.removeEventListener('waiting', onWaiting);
+  1831→      video.removeEventListener('canplay', onCanPlay);
+  1832→      video.removeEventListener('error', onError);
+  1833→      video.removeEventListener('volumechange', onVolumeChange);
+  1834→      video.removeEventListener('ended', onEnded);
+  1835→      video.removeEventListener('stalled', onStalled);
+  1836→      video.removeEventListener('suspend', onSuspend);
+  1837→      video.removeEventListener('emptied', onEmptied);
+  1838→    };
+  1839→  }, [onCompleted]);
+  1840→
+  1841→  // Shared HLS config — single source of truth for all HLS instances
+  1842→  const createHlsInstance = useCallback(
+  1843→    (video: HTMLVideoElement, onManifestParsed: (hls: Hls, data: Hls.ManifestParsedData) => void, onError: (hls: Hls, data: Hls.ErrorData) => void): Hls | null => {
+  1844→      if (!Hls.isSupported()) return null;
+  1845→
+  1846→      let hlsConfig: Hls.Config;
+  1847→
+  1848→      if (useMemoryLoader) {
+  1849→        // Download playback: use custom in-memory loader — no XHR, no blob URLs.
+  1850→        // Segment data is extracted lazily from the Blob via blob.slice().
+  1851→        // Delivered instantly — MSE's SourceBuffer provides natural backpressure
+  1852→        // via its async update queue.
+  1853→        hlsConfig = {
+  1854→          enableWorker: true, // Must be enabled — worker demuxes in a separate thread,
+  1855→                             // keeping audio/video PES extraction in sync. Disabling it
+  1856→                             // causes A/V desync because main-thread demuxing competes
+  1857→                             // with React re-renders, delaying SourceBuffer appends.
+  1858→          lowLatencyMode: false,
+  1859→          backBufferLength: 90,
+  1860→          startLevel: -1,
+  1861→          maxBufferLength: 60,
+  1862→          maxMaxBufferLength: 300,
+  1863→          maxBufferSize: 120 * 1024 * 1024,
+  1864→          startFragPrefetch: true,
+  1865→          loader: MemoryHlsLoader,
+  1866→          fLoader: MemoryHlsLoader, // Explicit: use custom loader for fragments too
+  1867→        };
+  1868→      } else {
+  1869→        // Streaming: use standard XHR loader with CDN proxy
+  1870→        hlsConfig = {
+  1871→          enableWorker: true,
+  1872→          lowLatencyMode: false,
+  1873→          backBufferLength: 90,
+  1874→          startLevel: -1,
+  1875→          maxBufferLength: 30,
+  1876→          maxMaxBufferLength: 60,
+  1877→          xhrSetup: (xhr, url) => {
+  1878→            // Don't proxy blob: URLs — they're local (fake m3u8 segments)
+  1879→            if (url.startsWith('blob:')) {
+  1880→              xhr.open('GET', url, true);
+  1881→              return;
+  1882→            }
+  1883→            let refererHint = '';
+  1884→            try {
+  1885→              const parsedUrl = new URL(url);
+  1886→              refererHint = parsedUrl.origin + '/';
+  1887→            } catch {
+  1888→              // URL parsing failed — no referer hint
+  1889→            }
+  1890→            let proxyUrl = `/api/stream/proxy?url=${encodeURIComponent(url)}`;
+  1891→            if (refererHint) {
+  1892→              proxyUrl += `&referer=${encodeURIComponent(refererHint)}`;
+  1893→            }
+  1894→            xhr.open('GET', proxyUrl, true);
+  1895→          },
+  1896→        };
+  1897→      }
+  1898→
+  1899→      const hls = new Hls(hlsConfig);
+  1900→
+  1901→      // ── Comprehensive HLS.js event logging for offline playback diagnostics ──
+  1902→      // These logs help diagnose freezing and A/V desync. All prefixed with [SV HLS].
+  1903→      if (useMemoryLoader) {
+  1904→        // Manifest events
+  1905→        hls.on(Hls.Events.MANIFEST_PARSED, (_e, data) => {
+  1906→          console.log(
+  1907→            `[SV HLS] MANIFEST_PARSED: ${data.levels.length} levels, ` +
+  1908→            `first level: ${data.levels[0]?.height}p@${data.levels[0]?.bitrate}bps, ` +
+  1909→            `audio: ${data.audio ? data.audio.length : 0} tracks`,
+  1910→          );
+  1911→        });
+  1912→
+  1913→        // Fragment loading events
+  1914→        hls.on(Hls.Events.FRAG_LOADED, (_e, data) => {
+  1915→          const frag = data.frag;
+  1916→          console.log(
+  1917→            `[SV HLS] FRAG_LOADED: sn=${frag.sn}, level=${frag.level}, ` +
+  1918→            `duration=${frag.duration.toFixed(3)}s, ` +
+  1919→            `start=${frag.start.toFixed(3)}s, ` +
+  1920→            `loaded=${data.fragStats?.loaded || '?'} bytes, ` +
+  1921→            `loading=${data.networkDetails ? 'network' : 'memory'}`,
+  1922→          );
+  1923→        });
+  1924→
+  1925→        hls.on(Hls.Events.FRAG_LOAD_EMERGENCY_ABORTED, (_e, data) => {
+  1926→          console.warn(`[SV HLS] FRAG_LOAD_EMERGENCY_ABORTED: frag sn=${data.frag.sn}`);
+  1927→        });
+  1928→
+  1929→        // Fragment parsing events — these fire when TS is demuxed
+  1930→        hls.on(Hls.Events.FRAG_PARSING_INIT_SEGMENT, (_e, data) => {
+  1931→          console.log(
+  1932→            `[SV HLS] FRAG_PARSING_INIT_SEGMENT: tracks=${Object.keys(data.tracks).join(',')}, ` +
+  1933→            `id=${data.id}, frag=${data.frag?.sn}`,
+  1934→          );
+  1935→        });
+  1936→
+  1937→        hls.on(Hls.Events.FRAG_PARSING_DATA, (_e, data) => {
+  1938→          console.log(
+  1939→            `[SV HLS] FRAG_PARSING_DATA: type=${data.type}, frag=${data.frag?.sn}, ` +
+  1940→            `start=${data.startPTS?.toFixed(3)}s, end=${data.endPTS?.toFixed(3)}s`,
+  1941→          );
+  1942→        });
+  1943→
+  1944→        // Buffer events — critical for diagnosing freezing
+  1945→        hls.on(Hls.Events.BUFFER_APPENDED, (_e, data) => {
+  1946→          console.log(
+  1947→            `[SV HLS] BUFFER_APPENDED: type=${data.type}, ` +
+  1948→            `chunkMeta=${data.chunkMeta?.sn || '?'}, ` +
+  1949→            `timeRange=${data.timeRanges ? 'available' : 'none'}`,
+  1950→          );
+  1951→        });
+  1952→
+  1953→        hls.on(Hls.Events.BUFFER_CODECS, (_e, data) => {
+  1954→          console.log(
+  1955→            `[SV HLS] BUFFER_CODECS: video=${data.videoCodec || 'none'}, audio=${data.audioCodec || 'none'}`,
+  1956→          );
+  1957→        });
+  1958→
+  1959→        hls.on(Hls.Events.BUFFER_CREATED, (_e, data) => {
+  1960→          const tracks = data.tracks;
+  1961→          const trackInfo = Object.entries(tracks).map(
+  1962→            ([type, t]: [string, unknown]) => {
+  1963→              const track = t as { codec?: string; container?: string };
+  1964→              return `${type}=${track.codec || '?'}`;
+  1965→            },
+  1966→          ).join(', ');
+  1967→          console.log(`[SV HLS] BUFFER_CREATED: ${trackInfo}`);
+  1968→        });
+  1969→
+  1970→        hls.on(Hls.Events.BUFFER_FLUSHED, (_e, data) => {
+  1971→          console.log(`[SV HLS] BUFFER_FLUSHED: type=${data.type}, startOffset=${data.startOffset}, endOffset=${data.endOffset}`);
+  1972→        });
+  1973→
+  1974→        // Stall / buffer state events
+  1975→        hls.on(Hls.Events.FRAG_BUFFERED, (_e, data) => {
+  1976→          const frag = data.frag;
+  1977→          const stats = data.stats;
+  1978→          console.log(
+  1979→            `[SV HLS] FRAG_BUFFERED: sn=${frag.sn}, duration=${frag.duration.toFixed(3)}s, ` +
+  1980→            `buffered=${stats?.buffered || 0}, ` +
+  1981→            `total=${stats?.total || 0}`,
+  1982→          );
+  1983→        });
+  1984→
+  1985→        // Key loading
+  1986→        hls.on(Hls.Events.KEY_LOADED, (_e, data) => {
+  1987→          console.log(`[SV HLS] KEY_LOADED: frag=${data.frag?.sn}`);
+  1988→        });
+  1989→
+  1990→        // Level switching
+  1991→        hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
+  1992→          console.log(`[SV HLS] LEVEL_SWITCHED: level=${data.level}`);
+  1993→        });
+  1994→      }
+  1995→
+  1996→      hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => onManifestParsed(hls, data));
+  1997→      hls.on(Hls.Events.ERROR, (_event, data) => {
+  1998→        // Always log ALL HLS.js errors — both fatal and non-fatal
+  1999→        console.error(
+  2000→          `[SV HLS] ERROR: type=${data.type}, details=${data.details}, fatal=${data.fatal}, ` +
+
+[showing lines 1-2000 of 3261; use offset=2001 with limit to continue reading]
