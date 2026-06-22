@@ -1,52 +1,61 @@
-// Generate minimalist premium PWA icons — red background + white play
+// Generate PWA icons from the StreamVault logo SVG (dark square + white Z)
 const sharp = require('sharp');
 const path = require('path');
+const fs = require('fs');
 
-async function generateIcons() {
-  const sizes = [192, 512, 180, 32];
+function buildLogoSVG(size) {
+  // Scale the original 30x30 viewBox logo to the target size
+  // Add padding for maskable safe zone (the outer 10% on each side is the "unsafe" area)
+  // We embed the original logo design as a static SVG (no animations for icons)
+  const padding = Math.round(size * 0.10);
+  const innerSize = size - padding * 2;
 
-  for (const size of sizes) {
-    const padding = Math.round(size * 0.16);
-    const innerSize = size - padding * 2;
-    const cornerRadius = Math.round(size * 0.2);
-
-    const svg = `
-    <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id="bgGrad" x1="0" y1="0" x2="${size}" y2="${size}" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stop-color="#E50914"/>
-          <stop offset="100%" stop-color="#CC0812"/>
-        </linearGradient>
-      </defs>
-
-      <!-- Red background -->
-      <rect x="0" y="0" width="${size}" height="${size}" rx="${cornerRadius}" ry="${cornerRadius}" fill="url(#bgGrad)"/>
-
-      <!-- White play triangle, centered with slight right offset -->
-      <g transform="translate(${size * 0.028}, 0)">
-        <polygon
-          points="${padding + innerSize * 0.33},${padding + innerSize * 0.18} ${padding + innerSize * 0.33},${padding + innerSize * 0.82} ${padding + innerSize * 0.78},${padding + innerSize * 0.50}"
-          fill="#FFFFFF"
-        />
-      </g>
-    </svg>`;
-
-    const publicDir = path.join(__dirname, '..', 'public');
-
-    if (size === 192 || size === 512) {
-      const outputPath = path.join(publicDir, `icon-${size}.png`);
-      await sharp(Buffer.from(svg)).resize(size, size).png().toFile(outputPath);
-      console.log(`Generated ${outputPath} (${size}x${size})`);
-    } else if (size === 180) {
-      const outputPath = path.join(publicDir, 'apple-touch-icon.png');
-      await sharp(Buffer.from(svg)).resize(180, 180).png().toFile(outputPath);
-      console.log(`Generated ${outputPath} (180x180)`);
-    } else if (size === 32) {
-      const outputPath = path.join(publicDir, 'favicon-32.png');
-      await sharp(Buffer.from(svg)).resize(32, 32).png().toFile(outputPath);
-      console.log(`Generated ${outputPath} (32x32)`);
-    }
-  }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <clipPath id="bgClip">
+      <rect x="0" y="0" width="${size}" height="${size}" rx="${Math.round(size * 0.18)}" ry="${Math.round(size * 0.18)}"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#bgClip)">
+    <!-- Dark background matching the app theme -->
+    <rect x="0" y="0" width="${size}" height="${size}" fill="#2D2D2D"/>
+    <!-- White Z lettermark — scaled from original 30x30 viewBox, centered -->
+    <g transform="translate(${padding}, ${padding}) scale(${innerSize / 30})">
+      <!-- Top bar of Z -->
+      <path fill="#FFFFFF" d="M15.47,7.1l-1.3,1.85c-0.2,0.29-0.54,0.47-0.9,0.47h-7.1V7.09C6.16,7.1,15.47,7.1,15.47,7.1z"/>
+      <!-- Diagonal of Z -->
+      <polygon fill="#FFFFFF" points="24.3,7.1 13.14,22.91 5.7,22.91 16.86,7.1"/>
+      <!-- Bottom bar of Z -->
+      <path fill="#FFFFFF" d="M14.53,22.91l1.31-1.86c0.2-0.29,0.54-0.47,0.9-0.47h7.09v2.33H14.53z"/>
+    </g>
+  </g>
+</svg>`;
 }
 
-generateIcons().catch(console.error);
+async function generateIcons() {
+  const publicDir = path.join(__dirname, '..', 'public');
+
+  const icons = [
+    { size: 512, name: 'icon-512.png' },
+    { size: 192, name: 'icon-192.png' },
+    { size: 180, name: 'apple-touch-icon.png' },
+    { size: 32,  name: 'favicon-32.png' },
+  ];
+
+  for (const { size, name } of icons) {
+    const svg = buildLogoSVG(size);
+    const outputPath = path.join(publicDir, name);
+    await sharp(Buffer.from(svg))
+      .resize(size, size)
+      .png()
+      .toFile(outputPath);
+    console.log(`✓ Generated ${name} (${size}x${size})`);
+  }
+
+  console.log('\nAll PWA icons regenerated from the StreamVault logo.');
+}
+
+generateIcons().catch(err => {
+  console.error('Icon generation failed:', err);
+  process.exit(1);
+});

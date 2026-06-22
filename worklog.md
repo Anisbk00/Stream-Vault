@@ -57,3 +57,27 @@ Stage Summary:
 - Server switcher UI is production-ready with premium iOS feel
 - All z-index layering verified (no conflicts with Watch Party PTT)
 - Edge cases handled (single source, empty URLs, undefined labels)
+
+---
+Task ID: 3
+Agent: Main Orchestrator
+Task: Fix PWA home screen icon — replace red play button with StreamVault "Z" logo
+
+Work Log:
+- Diagnosed root cause: scripts/generate-icons.js was generating red gradient + white play triangle icons, NOT the actual logo
+- Inspected public/logo.svg — dark #2D2D2D rounded square with white "Z" lettermark
+- Rewrote scripts/generate-icons.js to generate icons from the actual "Z" logo design
+- Generated all icon sizes: icon-192.png, icon-512.png, apple-touch-icon.png, favicon-32.png
+- Created scripts/generate-maskable-icon.js for maskable PWA variant with proper safe zone padding
+- Generated maskable icons: icon-maskable-192.png, icon-maskable-512.png
+- Updated public/manifest.json: split icons into "any" (4 entries) and "maskable" (4 entries) purposes — was incorrectly "any maskable" combined
+- Bumped service worker version v16 → v17 to force cache refresh on existing installs
+- Updated sv_sw_v16 → sv_sw_v17 force flag in layout.tsx
+- Browser verified: all icons display dark square + white "Z", no red play button
+- Lint: 0 errors (1 pre-existing warning in VideoPlayer)
+
+Stage Summary:
+- PWA icons now match the StreamVault brand (dark #2D2D2D + white "Z")
+- Maskable icons have proper safe zone for Android circular masks
+- Manifest properly declares separate "any" and "maskable" icon entries
+- SW version bump ensures existing users get the new icons on next load
