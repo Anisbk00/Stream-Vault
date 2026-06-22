@@ -1,8 +1,10 @@
 {
+  "id": "/",
   "name": "StreamVault",
   "short_name": "StreamVault",
   "description": "Premium Films & Series Streaming",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#080808",
@@ -34,6 +36,5 @@
       "purpose": "maskable"
     }
   ],
-  "screenshots": [],
   "prefer_related_applications": false
 }

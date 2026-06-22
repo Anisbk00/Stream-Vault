@@ -60,6 +60,53 @@ const nextConfig: NextConfig = {
         source: '/(.*)',
         headers: securityHeaders,
       },
+      // ── PWA icon files: explicit Content-Type + long cache ──
+      // iOS Safari and Android launchers are VERY picky about Content-Type
+      // and X-Content-Type-Options: nosniff means wrong type = rejected icon
+      {
+        source: '/icon-:size(\\d+).png',
+        headers: [
+          { key: 'Content-Type', value: 'image/png' },
+          { key: 'Cache-Control', value: 'public, max-age=604800, immutable' },
+        ],
+      },
+      {
+        source: '/icon-maskable-:size(\\d+).png',
+        headers: [
+          { key: 'Content-Type', value: 'image/png' },
+          { key: 'Cache-Control', value: 'public, max-age=604800, immutable' },
+        ],
+      },
+      {
+        source: '/apple-touch-icon.png',
+        headers: [
+          { key: 'Content-Type', value: 'image/png' },
+          { key: 'Cache-Control', value: 'public, max-age=604800, immutable' },
+        ],
+      },
+      {
+        source: '/favicon-32.png',
+        headers: [
+          { key: 'Content-Type', value: 'image/png' },
+          { key: 'Cache-Control', value: 'public, max-age=604800, immutable' },
+        ],
+      },
+      // ── Manifest: must serve as application/json with proper CORS ──
+      {
+        source: '/manifest.json',
+        headers: [
+          { key: 'Content-Type', value: 'application/manifest+json' },
+          { key: 'Cache-Control', value: 'public, max-age=300' },
+        ],
+      },
+      // ── Service worker: no cache, must always revalidate ──
+      {
+        source: '/sw.js',
+        headers: [
+          { key: 'Content-Type', value: 'application/javascript' },
+          { key: 'Cache-Control', value: 'no-cache, no-store, must-revalidate' },
+        ],
+      },
       // CSP on page responses only — exclude API, static assets, and public files
       {
         source: '/:path((?!api|_next/static|_next/image|sw\\.js|manifest\\.json|offline\\.html|robots\\.txt|favicon\\.ico|icon-|apple-touch-icon|placeholder-poster).*)',

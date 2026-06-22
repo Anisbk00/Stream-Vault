@@ -76,7 +76,10 @@ async function generateIcons() {
     const outputPath = path.join(publicDir, name);
     await sharp(Buffer.from(svg))
       .resize(size, size)
-      .png({ quality: 100, compressionLevel: 6 })
+      // CRITICAL: Force RGBA (colorType 6) output.
+      // Indexed/palette PNGs (colorType 3) are REJECTED by iOS Safari
+      // and many Android launchers for home screen icons.
+      .png({ quality: 100, compressionLevel: 6, palette: false })
       .toFile(outputPath);
     const fs = require('fs');
     const stat = fs.statSync(outputPath);
