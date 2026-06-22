@@ -1,4 +1,4 @@
-// StreamVault Service Worker v18
+// StreamVault Service Worker v19
 // ─────────────────────────────────────────────────────────────
 // Strategy:
 //   Install:               PRE-CACHE app shell (/) + all /_next/static/ assets from HTML
