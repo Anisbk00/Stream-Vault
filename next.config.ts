@@ -60,48 +60,18 @@ const nextConfig: NextConfig = {
         source: '/(.*)',
         headers: securityHeaders,
       },
-      // ── PWA icon files: explicit Content-Type + no-cache ──
-      // iOS Safari aggressively caches icons and NEVER re-fetches.
-      // Using no-cache ensures iOS always re-validates with the server.
-      // New sv-* filenames also help because iOS has never cached them.
+      // ── PWA icon files: explicit Content-Type ──
+      // With X-Content-Type-Options: nosniff, we must ensure correct MIME type.
+      // Short cache (5 min) so iOS doesn't cache stale icons for days.
       {
-        source: '/sv-icon-:size(\\d+).png',
+        source: '/pwa-:size(\\d+)x:size(\\d+).png',
         headers: [
           { key: 'Content-Type', value: 'image/png' },
           { key: 'Cache-Control', value: 'public, max-age=300' },
         ],
       },
       {
-        source: '/sv-maskable-:size(\\d+).png',
-        headers: [
-          { key: 'Content-Type', value: 'image/png' },
-          { key: 'Cache-Control', value: 'public, max-age=300' },
-        ],
-      },
-      {
-        source: '/sv-touch-:size(\\d+).png',
-        headers: [
-          { key: 'Content-Type', value: 'image/png' },
-          { key: 'Cache-Control', value: 'public, max-age=300' },
-        ],
-      },
-      {
-        source: '/sv-favicon.png',
-        headers: [
-          { key: 'Content-Type', value: 'image/png' },
-          { key: 'Cache-Control', value: 'public, max-age=300' },
-        ],
-      },
-      // Old filenames — still serve correctly for any cached requests
-      {
-        source: '/icon-:size(\\d+).png',
-        headers: [
-          { key: 'Content-Type', value: 'image/png' },
-          { key: 'Cache-Control', value: 'public, max-age=300' },
-        ],
-      },
-      {
-        source: '/icon-maskable-:size(\\d+).png',
+        source: '/maskable-:size(\\d+)x:size(\\d+).png',
         headers: [
           { key: 'Content-Type', value: 'image/png' },
           { key: 'Cache-Control', value: 'public, max-age=300' },
@@ -115,20 +85,13 @@ const nextConfig: NextConfig = {
         ],
       },
       {
-        source: '/apple-touch-icon-:size(\\d+).png',
+        source: '/favicon.png',
         headers: [
           { key: 'Content-Type', value: 'image/png' },
           { key: 'Cache-Control', value: 'public, max-age=300' },
         ],
       },
-      {
-        source: '/favicon-32.png',
-        headers: [
-          { key: 'Content-Type', value: 'image/png' },
-          { key: 'Cache-Control', value: 'public, max-age=300' },
-        ],
-      },
-      // ── Manifest: must serve as application/json with proper CORS ──
+      // ── Manifest ──
       {
         source: '/manifest.json',
         headers: [
@@ -146,7 +109,7 @@ const nextConfig: NextConfig = {
       },
       // CSP on page responses only — exclude API, static assets, and public files
       {
-        source: '/:path((?!api|_next/static|_next/image|sw\\.js|manifest\\.json|offline\\.html|robots\\.txt|favicon\\.ico|icon-|sv-|apple-touch-icon|placeholder-poster).*)',
+        source: '/:path((?!api|_next/static|_next/image|sw\\.js|manifest\\.json|offline\\.html|robots\\.txt|favicon|pwa-|maskable-|apple-touch-icon|placeholder-poster).*)',
         headers: [
           { key: 'Content-Security-Policy', value: CONTENT_SECURITY_POLICY },
         ],

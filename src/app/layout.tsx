@@ -29,15 +29,10 @@ export const metadata: Metadata = {
   authors: [{ name: "StreamVault" }],
   icons: {
     icon: [
-      { url: "/sv-favicon.png", sizes: "32x32", type: "image/png" },
-      { url: "/sv-icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/favicon.png", sizes: "32x32", type: "image/png" },
+      { url: "/pwa-192x192.png", sizes: "192x192", type: "image/png" },
     ],
-    apple: [
-      { url: "/apple-touch-icon.png", sizes: "180x180" },
-      { url: "/apple-touch-icon-167.png", sizes: "167x167" },
-      { url: "/apple-touch-icon-152.png", sizes: "152x152" },
-      { url: "/apple-touch-icon-120.png", sizes: "120x120" },
-    ],
+    apple: "/apple-touch-icon.png",
   },
   manifest: "/manifest.json",
   appleWebApp: {
@@ -78,10 +73,6 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  // Inject runtime Supabase config so the client always uses the latest
-  // env vars (not build-time baked values). Server components read
-  // process.env at request time, so this survives env var changes
-  // without needing a rebuild.
   const runtimeConfig = JSON.stringify({
     supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "",
     supabaseAnonKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || "",
@@ -90,22 +81,6 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning className="dark">
       <head>
-        {/* ── EXPLICIT PWA icon <link> tags ──
-            iOS Safari "Add to Home Screen" is a SYSTEM process separate from
-            the browser tab. It specifically looks for the WELL-KNOWN path
-            /apple-touch-icon.png at the domain root. This URL is hardcoded
-            into iOS Safari's icon discovery logic — other filenames may be
-            ignored by the system process even if they work in the browser. */}
-        <link rel="icon" type="image/png" sizes="32x32" href="/sv-favicon.png" />
-        <link rel="icon" type="image/png" sizes="192x192" href="/sv-icon-192.png" />
-        <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
-        <link rel="apple-touch-icon" sizes="167x167" href="/apple-touch-icon-167.png" />
-        <link rel="apple-touch-icon" sizes="152x152" href="/apple-touch-icon-152.png" />
-        <link rel="apple-touch-icon" sizes="120x120" href="/apple-touch-icon-120.png" />
-        <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/apple-touch-icon.png" />
-        {/* CRITICAL: iOS Safari needs this meta tag to recognize PWA.
-            Next.js appleWebApp.capable may not generate it reliably. */}
-        <meta name="apple-mobile-web-app-capable" content="yes" />
         <script
           dangerouslySetInnerHTML={{
             __html: `window.__SV_CONFIG__=${runtimeConfig}`,
@@ -130,7 +105,7 @@ export default function RootLayout({
               // ── Force-update: runs ONCE when SW version changes ──
               // Nukes all old SW registrations + caches, then reloads.
               // On reload, this script re-runs but the flag is set → skips to registration.
-              var FORCE_FLAG='sv_sw_v25';
+              var FORCE_FLAG='sv_sw_v26';
               if(!localStorage.getItem(FORCE_FLAG)){
                 if(navigator.onLine){
                   navigator.serviceWorker.getRegistrations().then(function(regs){
