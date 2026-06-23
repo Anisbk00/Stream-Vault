@@ -1,108 +1,65 @@
 /**
- * Generate PWA icons using sharp's SVG→PNG rendering.
- * Creates the EXACT RetroShield design (Art Deco shield with chevron + diamond)
- * matching the in-app RetroShield.tsx component, rendered in amber on black.
+ * Generate PWA icons that EXACTLY match the in-app logo:
+ *   Amber (#D97706) rounded-square background + white RetroShield icon
  *
- * The SVG is crafted to mirror RetroShield.tsx path-for-path:
- *   1. Outer shield silhouette
- *   2. Inner shield border (double-line Art Deco motif)
- *   3. Chevron stripes (vintage cinema heraldry)
- *   4. Filled center diamond (Art Deco focal point)
+ * This mirrors LoginScreen.tsx:
+ *   <div style={{ backgroundColor: '#D97706' }}>
+ *     <RetroShield className="text-white" />
+ *   </div>
+ *
+ * The SVG paths match RetroShield.tsx path-for-path.
  */
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs');
 
-const BG = '#080808';
 const BRAND = '#D97706';
+const BG = '#080808'; // App background — fills the corners outside the rounded square
+const WHITE = '#ffffff';
+const CORNER_RADIUS_RATIO = 0.18; // rounded-2xl feel
 
 /**
- * Build an SVG string for the RetroShield icon at a given pixel size.
- * The shield fills the canvas with appropriate padding.
+ * Build the PWA icon SVG: amber rounded square + white RetroShield.
  */
-function buildRetroShieldSVG(size, padding = 0) {
+function buildIconSVG(size, padding = 0) {
   const canvasSize = size - padding * 2;
-  // The RetroShield viewBox is 0 0 24 24.
-  // We scale it to fill the canvas area.
-  const sw = 1.2; // base strokeWidth matching RetroShield default
+  const r = Math.round(canvasSize * CORNER_RADIUS_RATIO);
+  const sw = 1.2;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-  <!-- Black background — fully opaque -->
+  <!-- Black background fills corners (fully opaque, no transparency) -->
   <rect width="${size}" height="${size}" fill="${BG}"/>
+  <!-- Amber rounded-square background (like the login screen logo box) -->
+  <rect x="${padding}" y="${padding}" width="${canvasSize}" height="${canvasSize}" rx="${r}" ry="${r}" fill="${BRAND}"/>
+  <!-- White RetroShield centered inside -->
   <g transform="translate(${padding}, ${padding})">
     <svg width="${canvasSize}" height="${canvasSize}" viewBox="0 0 24 24" fill="none">
-      <!-- Outer shield shape — Art Deco heraldic silhouette -->
+      <!-- Outer shield shape -->
       <path
         d="M12 2L3 7V12C3 16.97 7.03 21.5 12 22.5C16.97 21.5 21 16.97 21 12V7L12 2Z"
-        stroke="${BRAND}"
+        stroke="${WHITE}"
         stroke-width="${sw}"
         stroke-linejoin="round"
       />
       <!-- Inner shield border — double-line Art Deco motif -->
       <path
         d="M12 4.5L5.5 8.2V12C5.5 15.8 8.4 19.3 12 20.2C15.6 19.3 18.5 15.8 18.5 12V8.2L12 4.5Z"
-        stroke="${BRAND}"
-        stroke-width="${sw * 0.6}"
-        stroke-linejoin="round"
-        opacity="0.6"
-      />
-      <!-- Chevron stripes — vintage cinema heraldry -->
-      <path
-        d="M12 8L8.5 12L12 16L15.5 12L12 8Z"
-        stroke="${BRAND}"
-        stroke-width="${sw * 0.8}"
-        stroke-linejoin="round"
-      />
-      <!-- Center diamond — Art Deco focal point -->
-      <path
-        d="M12 10L10.5 12L12 14L13.5 12L12 10Z"
-        fill="${BRAND}"
-        opacity="0.9"
-      />
-    </svg>
-  </g>
-</svg>`;
-}
-
-/**
- * Build a "filled" variant for the RetroShield icon —
- * The outer shield is filled with brand color, inner details are white/light,
- * making it more visible as a small app icon on home screens.
- */
-function buildFilledRetroShieldSVG(size, padding = 0) {
-  const canvasSize = size - padding * 2;
-  const sw = 1.2;
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
-  <!-- Black background — fully opaque -->
-  <rect width="${size}" height="${size}" fill="${BG}"/>
-  <g transform="translate(${padding}, ${padding})">
-    <svg width="${canvasSize}" height="${canvasSize}" viewBox="0 0 24 24" fill="none">
-      <!-- Filled outer shield — solid amber background -->
-      <path
-        d="M12 2L3 7V12C3 16.97 7.03 21.5 12 22.5C16.97 21.5 21 16.97 21 12V7L12 2Z"
-        fill="${BRAND}"
-        stroke="none"
-      />
-      <!-- Inner shield border — double-line Art Deco motif (white on amber) -->
-      <path
-        d="M12 4.5L5.5 8.2V12C5.5 15.8 8.4 19.3 12 20.2C15.6 19.3 18.5 15.8 18.5 12V8.2L12 4.5Z"
-        stroke="#ffffff"
+        stroke="${WHITE}"
         stroke-width="${sw * 0.6}"
         stroke-linejoin="round"
         opacity="0.5"
       />
-      <!-- Chevron stripes — white on amber -->
+      <!-- Chevron stripes -->
       <path
         d="M12 8L8.5 12L12 16L15.5 12L12 8Z"
-        stroke="#ffffff"
+        stroke="${WHITE}"
         stroke-width="${sw * 0.8}"
         stroke-linejoin="round"
       />
-      <!-- Center diamond — white filled -->
+      <!-- Center diamond — filled white -->
       <path
         d="M12 10L10.5 12L12 14L13.5 12L12 10Z"
-        fill="#ffffff"
+        fill="${WHITE}"
         opacity="0.9"
       />
     </svg>
@@ -110,12 +67,12 @@ function buildFilledRetroShieldSVG(size, padding = 0) {
 </svg>`;
 }
 
-async function generateIcon(size, name, svgBuilder, maskable = false) {
+async function generateIcon(size, name, maskable = false) {
   const publicDir = path.join(__dirname, '..', 'public');
   const outputPath = path.join(publicDir, name);
 
-  const padding = maskable ? Math.round(size * 0.10) : Math.round(size * 0.08);
-  const svg = svgBuilder(size, padding);
+  const padding = maskable ? Math.round(size * 0.10) : Math.round(size * 0.06);
+  const svg = buildIconSVG(size, padding);
 
   await sharp(Buffer.from(svg))
     .png({
@@ -125,7 +82,7 @@ async function generateIcon(size, name, svgBuilder, maskable = false) {
     })
     .toFile(outputPath);
 
-  // Verify: check file exists and has zero transparent pixels
+  // Verify: zero transparent pixels
   const stat = fs.statSync(outputPath);
   const verifyBuf = await sharp(outputPath).raw().toBuffer();
   let transparent = 0;
@@ -138,23 +95,19 @@ async function generateIcon(size, name, svgBuilder, maskable = false) {
 
 async function main() {
   const icons = [
-    // Primary icons (used by manifest + browser) — filled style for visibility
-    { size: 512, name: 'pwa-512x512.png', fn: buildFilledRetroShieldSVG, maskable: false },
-    { size: 192, name: 'pwa-192x192.png', fn: buildFilledRetroShieldSVG, maskable: false },
-    // Apple touch icon — filled style
-    { size: 180, name: 'apple-touch-icon.png', fn: buildFilledRetroShieldSVG, maskable: false },
-    // Favicon — filled style
-    { size: 32, name: 'favicon.png', fn: buildFilledRetroShieldSVG, maskable: false },
-    // Maskable icons — extra safe zone padding
-    { size: 512, name: 'maskable-512x512.png', fn: buildFilledRetroShieldSVG, maskable: true },
-    { size: 192, name: 'maskable-192x192.png', fn: buildFilledRetroShieldSVG, maskable: true },
+    { size: 512, name: 'pwa-512x512.png', maskable: false },
+    { size: 192, name: 'pwa-192x192.png', maskable: false },
+    { size: 180, name: 'apple-touch-icon.png', maskable: false },
+    { size: 32,  name: 'favicon.png', maskable: false },
+    { size: 512, name: 'maskable-512x512.png', maskable: true },
+    { size: 192, name: 'maskable-192x192.png', maskable: true },
   ];
 
-  for (const { size, name, fn, maskable } of icons) {
-    await generateIcon(size, name, fn, maskable);
+  for (const { size, name, maskable } of icons) {
+    await generateIcon(size, name, maskable);
   }
 
-  console.log('\nAll PWA icons generated — RetroShield Art Deco design, retro amber, zero transparency');
+  console.log('\nAll PWA icons generated — amber rounded square + white RetroShield (matches sign-in screen)');
 }
 
 main().catch(err => {
