@@ -221,12 +221,16 @@ export default function LoginScreen() {
         transition={{ duration: 0.5, ease: 'easeOut' }}
         className="w-full max-w-sm"
       >
-        {/* Logo */}
+        {/* Logo — matches splash screen: amber shield on dark, no background box */}
         <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4" style={{ backgroundColor: '#D97706' }}>
-            <RetroShield className="size-7 text-white" strokeWidth={1.5} />
+          <div className="mb-4">
+            <RetroShield
+              className="size-14"
+              style={{ color: '#D97706' }}
+              strokeWidth={1.2}
+            />
           </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">
+          <h1 className="text-2xl font-bold tracking-[0.2em] uppercase" style={{ color: '#D97706' }}>
             StreamVault
           </h1>
           <p className="text-sm text-[#808080] mt-1">Sign in to continue</p>

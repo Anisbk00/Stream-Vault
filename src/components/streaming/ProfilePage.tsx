@@ -913,10 +913,8 @@ export default function ProfilePage() {
           {/* ── Footer ──────────────────────────────────── */}
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: 0.35 }} className="flex flex-col items-center mt-6 mb-4">
             <div className="flex items-center gap-1.5 mb-1">
-              <div className="w-5 h-5 rounded-md flex items-center justify-center" style={{ backgroundColor: '#D97706' }}>
-                <RetroShield className="size-2.5 text-white" strokeWidth={2.5} />
-              </div>
-              <span className="text-sm font-bold text-white tracking-tight">StreamVault</span>
+              <RetroShield className="size-4" style={{ color: '#D97706' }} strokeWidth={1.5} />
+              <span className="text-sm font-bold tracking-[0.1em] uppercase" style={{ color: '#D97706' }}>StreamVault</span>
             </div>
           </motion.div>
         </>

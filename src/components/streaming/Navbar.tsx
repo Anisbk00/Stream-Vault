@@ -67,10 +67,8 @@ export default function Navbar({
             onClick={() => onNavigate('home')}
             className={`flex items-center gap-2 cursor-pointer group press-effect ${showSearch ? 'hidden' : 'flex'}`}
           >
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#D97706' }}>
-              <RetroShield className="size-4 text-white" strokeWidth={2} />
-            </div>
-            <span className="text-lg font-bold text-white tracking-tight">
+            <RetroShield className="size-6" style={{ color: '#D97706' }} strokeWidth={1.5} />
+            <span className="text-lg font-bold tracking-[0.1em] uppercase" style={{ color: '#D97706' }}>
               StreamVault
             </span>
           </button>
