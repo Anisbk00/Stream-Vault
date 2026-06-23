@@ -98,7 +98,7 @@ export default function RootLayout({
               // ── Force-update: runs ONCE when SW version changes ──
               // Nukes all old SW registrations + caches, then reloads.
               // On reload, this script re-runs but the flag is set → skips to registration.
-              var FORCE_FLAG='sv_sw_v28';
+              var FORCE_FLAG='sv_sw_v29';
               if(!localStorage.getItem(FORCE_FLAG)){
                 if(navigator.onLine){
                   navigator.serviceWorker.getRegistrations().then(function(regs){
