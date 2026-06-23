@@ -1,16 +1,16 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Shield } from 'lucide-react';
+import RetroShield from './RetroShield';
 
 /**
  * Premium vintage splash screen — 2-color, Apple-grade minimalism.
  * Displays while auth + data prefetch runs in the background.
  *
- * Palette: #080808 (void black) + #E50914 (sv-red)
+ * Palette: #080808 (void black) + #D97706 (retro amber)
  */
 
-const BRAND = '#E50914';
+const BRAND = '#D97706';
 
 export default function SplashScreen() {
   return (
@@ -30,9 +30,10 @@ export default function SplashScreen() {
         transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
         className="mb-8"
       >
-        <Shield
+        <RetroShield
           className="size-14"
-          style={{ color: BRAND, strokeWidth: 1.2 }}
+          style={{ color: BRAND }}
+          strokeWidth={1.2}
         />
       </motion.div>
 

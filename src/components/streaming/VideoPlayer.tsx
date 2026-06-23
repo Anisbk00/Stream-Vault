@@ -1013,7 +1013,7 @@ function IframeEmbedPlayer({
                     const query = encodeURIComponent(`${title} ${searchSuffix}`);
                     window.open(`https://www.youtube.com/results?search_query=${query}`, '_blank');
                   }}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#FF0000]/15 hover:bg-[#FF0000]/25 text-red-400 hover:text-red-300 text-xs font-medium transition-colors cursor-pointer"
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#D97706]/15 hover:bg-[#D97706]/25 text-amber-400 hover:text-amber-300 text-xs font-medium transition-colors cursor-pointer"
                 >
                   <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current">
                     <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814z"/>
@@ -2615,7 +2615,7 @@ function HlsVideoPlayer({
                     const q = encodeURIComponent(`${title} ${searchSuffix}`);
                     window.open(`https://www.youtube.com/results?search_query=${q}`, '_blank');
                   }}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#FF0000]/15 hover:bg-[#FF0000]/25 text-red-400 hover:text-red-300 text-xs font-medium transition-colors cursor-pointer"
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#D97706]/15 hover:bg-[#D97706]/25 text-amber-400 hover:text-amber-300 text-xs font-medium transition-colors cursor-pointer"
                 >
                   <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current">
                     <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814z"/>
@@ -3108,7 +3108,7 @@ class PlayerErrorBoundary extends Component<PlayerErrorBoundaryProps, PlayerErro
                 const q = encodeURIComponent(`${this.props.title} ${this.props.mediaType === 'tv' ? 'series' : 'full movie'}`);
                 window.open(`https://www.youtube.com/results?search_query=${q}`, '_blank');
               }}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#FF0000]/15 hover:bg-[#FF0000]/25 text-red-400 hover:text-red-300 text-xs font-medium transition-colors cursor-pointer"
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#D97706]/15 hover:bg-[#D97706]/25 text-amber-400 hover:text-amber-300 text-xs font-medium transition-colors cursor-pointer"
             >
               <svg viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current">
                 <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814z"/>

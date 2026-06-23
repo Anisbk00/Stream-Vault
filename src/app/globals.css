@@ -42,8 +42,8 @@
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
 
-  --color-sv-red: #E50914;
-  --color-sv-red-hover: #F40612;
+  --color-sv-red: #D97706;
+  --color-sv-red-hover: #E8930C;
   --color-sv-gold: #F5C842;
   --color-sv-blue: #4A90D9;
 }
@@ -56,7 +56,7 @@
   --card-foreground: #F5F5F5;
   --popover: #1a1a1a;
   --popover-foreground: #F5F5F5;
-  --primary: #E50914;
+  --primary: #D97706;
   --primary-foreground: #ffffff;
   --secondary: #1a1a1a;
   --secondary-foreground: #F5F5F5;
@@ -64,23 +64,23 @@
   --muted-foreground: #A0A0A0;
   --accent: #1a1a1a;
   --accent-foreground: #F5F5F5;
-  --destructive: #E50914;
+  --destructive: #D97706;
   --border: rgba(255, 255, 255, 0.08);
   --input: rgba(255, 255, 255, 0.12);
-  --ring: #E50914;
-  --chart-1: #E50914;
+  --ring: #D97706;
+  --chart-1: #D97706;
   --chart-2: #F5C842;
   --chart-3: #4A90D9;
   --chart-4: #22c55e;
   --chart-5: #a855f7;
   --sidebar: #0a0a0a;
   --sidebar-foreground: #F5F5F5;
-  --sidebar-primary: #E50914;
+  --sidebar-primary: #D97706;
   --sidebar-primary-foreground: #ffffff;
   --sidebar-accent: #1a1a1a;
   --sidebar-accent-foreground: #F5F5F5;
   --sidebar-border: rgba(255, 255, 255, 0.08);
-  --sidebar-ring: #E50914;
+  --sidebar-ring: #D97706;
 }
 
 @layer base {
@@ -244,7 +244,7 @@
   appearance: none;
   width: 14px;
   height: 14px;
-  background: #E50914;
+  background: #D97706;
   border-radius: 50%;
   cursor: pointer;
   opacity: 0;
@@ -258,7 +258,7 @@
 .player-progress::-moz-range-thumb {
   width: 14px;
   height: 14px;
-  background: #E50914;
+  background: #D97706;
   border-radius: 50%;
   border: none;
   cursor: pointer;
@@ -428,9 +428,9 @@ iframe {
 }
 
 .genre-chip:hover {
-  background: rgba(229, 9, 20, 0.2);
-  border-color: #E50914;
-  color: #E50914;
+  background: rgba(217, 119, 6, 0.2);
+  border-color: #D97706;
+  color: #D97706;
 }
 
 /* Episode card */

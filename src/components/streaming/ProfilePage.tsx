@@ -13,11 +13,11 @@ import {
   Loader2,
   LogOut,
   Plus,
-  Shield,
   Subtitles,
   Users,
   X,
 } from 'lucide-react';
+import RetroShield from './RetroShield';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { useAuthStore, getAuthToken, useSettingsStore } from '@/store';
 import { useWatchPartyStore } from '@/store/watch-party';
@@ -762,7 +762,7 @@ export default function ProfilePage() {
                       <div className="relative flex-shrink-0">
                         <div
                           className="rounded-full overflow-hidden border"
-                          style={{ borderColor: isSelected ? 'rgba(229, 9, 20, 0.4)' : 'rgba(255,255,255,0.08)', width: 56, height: 56 }}
+                          style={{ borderColor: isSelected ? 'rgba(217, 119, 6, 0.4)' : 'rgba(255,255,255,0.08)', width: 56, height: 56 }}
                         >
                           {u.avatar_url ? (
                             <img src={u.avatar_url} alt={u.name} className="w-full h-full object-cover" />
@@ -913,8 +913,8 @@ export default function ProfilePage() {
           {/* ── Footer ──────────────────────────────────── */}
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.5, delay: 0.35 }} className="flex flex-col items-center mt-6 mb-4">
             <div className="flex items-center gap-1.5 mb-1">
-              <div className="w-5 h-5 rounded-md flex items-center justify-center" style={{ backgroundColor: '#E50914' }}>
-                <Shield className="size-2.5 text-white" strokeWidth={2.5} />
+              <div className="w-5 h-5 rounded-md flex items-center justify-center" style={{ backgroundColor: '#D97706' }}>
+                <RetroShield className="size-2.5 text-white" strokeWidth={2.5} />
               </div>
               <span className="text-sm font-bold text-white tracking-tight">StreamVault</span>
             </div>

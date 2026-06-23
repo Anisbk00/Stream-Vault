@@ -112,3 +112,32 @@ Stage Summary:
 - Membership verification now covers all API route action handlers
 - Dead Socket.IO types removed, store deduplicated, redundant fallback simplified
 - Splash screen no longer deadlocks when Supabase is unconfigured
+
+---
+Task ID: 1
+Agent: main
+Task: Replace Logo with RetroShield + change color system from Netflix red (#E50914) to 1920s retro amber (#D97706)
+
+Work Log:
+- Scanned entire codebase for all red color references (found 131+ locations across 28+ files)
+- Created RetroShield.tsx — a custom Art Deco shield SVG component with chevron + diamond motifs
+- Updated globals.css: changed --color-sv-red (#E50914→#D97706), --color-sv-red-hover (#F40612→#E8930C), --primary, --destructive, --ring, --chart-1, --sidebar-primary, --sidebar-ring, player-progress thumbs, genre-chip hover
+- Replaced Shield from lucide-react with RetroShield in: SplashScreen, Navbar, LoginScreen, ProfilePage
+- Updated all hardcoded #E50914 inline styles in: Navbar, LoginScreen, ProfilePage, error.tsx, global-error.tsx
+- Updated #FF0000 references in VideoPlayer.tsx to #D97706 (amber equivalents)
+- Updated rgba(229,9,20,...) → rgba(217,119,6,...) in ProfilePage and globals.css
+- Updated error pages (error.tsx, global-error.tsx) with new RetroShield SVG and amber color
+- Updated offline.html and sw.js inline HTML to use #D97706
+- Updated PWA icon generator (R=217, G=119, B=6) and regenerated all icons
+- Updated manifest.json theme_color to #D97706
+- Copied new icons to src/app/icon.png and src/app/apple-icon.png
+- Lint check passed (0 errors, 1 pre-existing warning)
+- Browser verification passed on both mobile and desktop viewports
+
+Stage Summary:
+- Primary brand color: #E50914 (Netflix red) → #D97706 (1920s retro amber)
+- Hover color: #F40612 → #E8930C
+- Logo: Lucide Shield → Custom RetroShield (Art Deco design with chevron + diamond)
+- All 85+ Tailwind `sv-red` class usages automatically updated via CSS variable change
+- All PWA icons regenerated with amber shield
+- Zero remaining #E50914 references in codebase

@@ -14,12 +14,12 @@ export default function GlobalError({
         style={{ fontFamily: 'system-ui, sans-serif' }}
       >
         <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-6"
-          style={{ backgroundColor: '#E50914' }}
+          style={{ backgroundColor: '#D97706' }}
         >
           <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10" />
-            <line x1="15" y1="9" x2="9" y2="15" />
-            <line x1="9" y1="9" x2="15" y2="15" />
+            <path d="M12 2L3 7V12C3 16.97 7.03 21.5 12 22.5C16.97 21.5 21 16.97 21 12V7L12 2Z" />
+            <path d="M12 8L8.5 12L12 16L15.5 12L12 8Z" />
+            <path d="M12 10L10.5 12L12 14L13.5 12L12 10Z" fill="white" opacity="0.9" />
           </svg>
         </div>
         <h1 className="text-xl font-bold text-white mb-2">Application Error</h1>
@@ -29,7 +29,7 @@ export default function GlobalError({
         <button
           onClick={reset}
           className="px-6 py-3 rounded-xl text-white font-semibold text-sm transition-colors cursor-pointer"
-          style={{ backgroundColor: '#E50914' }}
+          style={{ backgroundColor: '#D97706' }}
         >
           Refresh
         </button>

@@ -3,7 +3,7 @@
  * NO SVG involved — eliminates any SVG→PNG rendering issues that
  * iOS Safari's system-level "Add to Home Screen" process might reject.
  *
- * Creates a solid red shield shape on opaque black background
+ * Creates a solid amber shield shape on opaque black background
  * using direct pixel manipulation.
  */
 const sharp = require('sharp');
@@ -69,7 +69,7 @@ function createShieldPixels(size) {
     return nx >= leftX && nx <= rightX;
   }
 
-  // Paint shield pixels with red gradient
+  // Paint shield pixels with amber gradient
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const nx = (x - pad) / w;
@@ -77,11 +77,11 @@ function createShieldPixels(size) {
 
       if (nx >= 0 && nx <= 1 && ny >= 0 && ny <= 1 && isInShield(nx, ny)) {
         const idx = (y * size + x) * 4;
-        // Red gradient: brighter at top, darker at bottom
+        // Amber gradient: brighter at top, darker at bottom
         const gradient = 1.0 - ny * 0.15;
-        pixels[idx] = Math.round(229 * gradient);     // R (#E50914 base)
-        pixels[idx + 1] = Math.round(9 * gradient);   // G
-        pixels[idx + 2] = Math.round(20 * gradient);  // B
+        pixels[idx] = Math.round(217 * gradient);     // R (#D97706 base)
+        pixels[idx + 1] = Math.round(119 * gradient);   // G
+        pixels[idx + 2] = Math.round(6 * gradient);  // B
         pixels[idx + 3] = 255;                         // A
       }
     }
@@ -168,7 +168,7 @@ async function main() {
     await generateIcon(size, name, fn);
   }
 
-  console.log('\nAll PWA icons generated — raw pixel shield, zero SVG, zero transparency');
+  console.log('\nAll PWA icons generated — raw pixel shield, zero SVG, zero transparency — retro amber');
 }
 
 main().catch(err => {

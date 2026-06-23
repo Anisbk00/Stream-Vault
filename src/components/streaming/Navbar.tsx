@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useRef, useState, type RefObject } from 'react';
-import { Search, Shield } from 'lucide-react';
+import { Search } from 'lucide-react';
+import RetroShield from './RetroShield';
 
 interface NavbarProps {
   onNavigate: (page: string) => void;
@@ -66,8 +67,8 @@ export default function Navbar({
             onClick={() => onNavigate('home')}
             className={`flex items-center gap-2 cursor-pointer group press-effect ${showSearch ? 'hidden' : 'flex'}`}
           >
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#E50914' }}>
-              <Shield className="size-4 text-white" strokeWidth={2} />
+            <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ backgroundColor: '#D97706' }}>
+              <RetroShield className="size-4 text-white" strokeWidth={2} />
             </div>
             <span className="text-lg font-bold text-white tracking-tight">
               StreamVault

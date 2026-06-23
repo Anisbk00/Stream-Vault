@@ -3,7 +3,8 @@
 import { useState, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
-import { BicepsFlexed, Eye, EyeOff, Loader2, LogIn, Shield, MonitorSmartphone } from 'lucide-react';
+import { BicepsFlexed, Eye, EyeOff, Loader2, LogIn, MonitorSmartphone } from 'lucide-react';
+import RetroShield from './RetroShield';
 import { getMyProfile } from '@/lib/supabase';
 import { registerSession } from '@/lib/session-manager';
 import { useAuthStore } from '@/store';
@@ -222,8 +223,8 @@ export default function LoginScreen() {
       >
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
-          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4" style={{ backgroundColor: '#E50914' }}>
-            <Shield className="size-7 text-white" strokeWidth={1.5} />
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-4" style={{ backgroundColor: '#D97706' }}>
+            <RetroShield className="size-7 text-white" strokeWidth={1.5} />
           </div>
           <h1 className="text-2xl font-bold text-white tracking-tight">
             StreamVault
@@ -245,7 +246,7 @@ export default function LoginScreen() {
               autoComplete="email"
               placeholder="Email"
               disabled={isLoading}
-              className={`w-full bg-white/[0.06] border rounded-xl px-4 py-3.5 text-[15px] text-[#F5F5F5] placeholder:text-[#505050] outline-none transition-colors disabled:opacity-50 ${emailError ? 'border-[#E50914]/60 focus:border-[#E50914]' : 'border-white/[0.12] focus:border-sv-red/50'}`}
+              className={`w-full bg-white/[0.06] border rounded-xl px-4 py-3.5 text-[15px] text-[#F5F5F5] placeholder:text-[#505050] outline-none transition-colors disabled:opacity-50 ${emailError ? 'border-[#D97706]/60 focus:border-[#D97706]' : 'border-white/[0.12] focus:border-sv-red/50'}`}
             />
             <AnimatePresence>
               {emailError && (
@@ -254,7 +255,7 @@ export default function LoginScreen() {
                   animate={{ opacity: 1, height: 'auto', marginTop: 6 }}
                   exit={{ opacity: 0, height: 0, marginTop: 0 }}
                   transition={{ duration: 0.2 }}
-                  className="text-[12px] text-[#E50914] leading-snug overflow-hidden"
+                  className="text-[12px] text-[#D97706] leading-snug overflow-hidden"
                 >
                   {emailError}
                 </motion.p>
@@ -274,7 +275,7 @@ export default function LoginScreen() {
               autoComplete="current-password"
               placeholder="Password"
               disabled={isLoading}
-              className={`w-full bg-white/[0.06] border rounded-xl px-4 py-3.5 pr-12 text-[15px] text-[#F5F5F5] placeholder:text-[#505050] outline-none transition-colors disabled:opacity-50 ${passwordError ? 'border-[#E50914]/60 focus:border-[#E50914]' : 'border-white/[0.12] focus:border-sv-red/50'}`}
+              className={`w-full bg-white/[0.06] border rounded-xl px-4 py-3.5 pr-12 text-[15px] text-[#F5F5F5] placeholder:text-[#505050] outline-none transition-colors disabled:opacity-50 ${passwordError ? 'border-[#D97706]/60 focus:border-[#D97706]' : 'border-white/[0.12] focus:border-sv-red/50'}`}
             />
             <button
               type="button"
@@ -292,7 +293,7 @@ export default function LoginScreen() {
                   animate={{ opacity: 1, height: 'auto', marginTop: 6 }}
                   exit={{ opacity: 0, height: 0, marginTop: 0 }}
                   transition={{ duration: 0.2 }}
-                  className="text-[12px] text-[#E50914] leading-snug overflow-hidden"
+                  className="text-[12px] text-[#D97706] leading-snug overflow-hidden"
                 >
                   {passwordError}
                 </motion.p>
@@ -327,7 +328,7 @@ export default function LoginScreen() {
             >
               <div className="bg-white/[0.06] border border-white/[0.12] rounded-xl p-4 space-y-3">
                 <div className="flex items-start gap-3">
-                  <MonitorSmartphone className="size-5 text-[#E50914] shrink-0 mt-0.5" />
+                  <MonitorSmartphone className="size-5 text-[#D97706] shrink-0 mt-0.5" />
                   <div className="min-w-0">
                     <p className="text-[13px] font-medium text-[#F5F5F5]">
                       Too many devices
