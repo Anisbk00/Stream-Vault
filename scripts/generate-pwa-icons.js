@@ -25,15 +25,18 @@ function buildIconSVG(size, padding = 0) {
   const canvasSize = size - padding * 2;
   const r = Math.round(canvasSize * CORNER_RADIUS_RATIO);
   const sw = 1.2;
+  // Extra inset so the shield sits smaller and centered inside the amber square
+  const shieldInset = Math.round(canvasSize * 0.18);
+  const shieldSize = canvasSize - shieldInset * 2;
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
   <!-- Black background fills corners (fully opaque, no transparency) -->
   <rect width="${size}" height="${size}" fill="${BG}"/>
   <!-- Amber rounded-square background (like the login screen logo box) -->
   <rect x="${padding}" y="${padding}" width="${canvasSize}" height="${canvasSize}" rx="${r}" ry="${r}" fill="${BRAND}"/>
-  <!-- White RetroShield centered inside -->
-  <g transform="translate(${padding}, ${padding})">
-    <svg width="${canvasSize}" height="${canvasSize}" viewBox="0 0 24 24" fill="none">
+  <!-- White RetroShield centered inside with breathing room -->
+  <g transform="translate(${padding + shieldInset}, ${padding + shieldInset})">
+    <svg width="${shieldSize}" height="${shieldSize}" viewBox="0 0 24 24" fill="none">
       <!-- Outer shield shape -->
       <path
         d="M12 2L3 7V12C3 16.97 7.03 21.5 12 22.5C16.97 21.5 21 16.97 21 12V7L12 2Z"
