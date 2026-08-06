@@ -1,0 +1,421 @@
+     1→     1→---
+     2→     2→Task ID: 1
+     3→     3→Agent: Main Orchestrator
+     4→     4→Task: Clone Stream-Vault repo and replace existing project, then scan entire codebase
+     5→     5→
+     6→     6→Work Log:
+     7→     7→- Cloned https://github.com/Anisbk00/Stream-Vault.git using provided token
+     8→     8→- Replaced all content in /home/z/my-project with the cloned repo
+     9→     9→- Installed dependencies via bun install (46+ packages added)
+    10→    10→- Dev server running on port 3000 — serving 200 OK
+    11→    11→- Launched 4 parallel deep-scan agents covering: (1) project structure & config, (2) all 22+ API routes, (3) all 27 UI components + pages + hooks + stores, (4) backend services & external integrations
+    12→    12→
+    13→    13→Stage Summary:
+    14→    14→- Project successfully cloned and running at localhost:3000
+    15→    15→- Complete codebase scan performed — detailed report below
+    16→    16→- Key finding: App uses Supabase exclusively (not Prisma), Prisma schema is boilerplate leftover
+    17→    17→- Key finding: SPA architecture with custom Zustand-based routing (no Next.js router pages)
+    18→    18→- Key finding: 22+ API endpoints across TMDB proxy, Supabase auth/data, video source resolution
+    19→    19→- Key finding: Sophisticated download pipeline with HLS→MP4 remux, offline playback via IndexedDB
+    20→    20→- Key finding: Watch Party with WebRTC voice, Supabase Realtime sync, PTT voice clips for iOS
+    21→    21→- Key finding: PWA with service worker v16, offline fallback, device session management (max 2)
+    22→    22→- Key finding: No AI/LLM/VLM integrations used (z-ai-web-dev-sdk is listed but not imported)
+    23→    23→- Key finding: next-auth is listed but not used (Supabase Auth is primary)
+    24→    24→- Key finding: No middleware.ts exists — all auth checks are per-route
+    25→    25→- Key finding: Root JSON files (fmhy_*, vidsrc_*, watanflix, search*) are static research data, not runtime code
+    26→    26→
+    27→    27→---
+    28→    28→Task ID: 2
+    29→    29→Agent: Main Orchestrator
+    30→    30→Task: Add VidSrcLink embedder + premium iOS-style server switcher UI next to fullscreen icon
+    31→    31→
+    32→    32→Work Log:
+    33→    33→- Added VidSrcLink (vidsrc.link) as Tier 2 embedder provider in /api/stream/source/route.ts
+    34→    34→- Added buildVidSrcLinkEmbedUrl function (movie + TV URL formats)
+    35→    35→- Added vidsrc.link to embed proxy ALLOWED_HOSTS in /api/stream/embed/route.ts
+    36→    36→- Updated getProviderLabel in VideoPlayer to recognize vidsrc.link → "VidSrcLink"
+    37→    37→- Updated isEmbedUrl to handle vidsrc.link URLs (already covered by /vidsrc\./ pattern)
+    38→    38→- Added vidsrc.link to ALLOWED_MESSAGE_ORIGINS for postMessage validation
+    39→    39→- Made currentLabel reactive (was static useState, now updates on source switch)
+    40→    40→- Added providerLabels useMemo array for server switcher dropdown
+    41→    41→- Added switchToSource callback for direct source index switching
+    42→    42→- Updated tryNextSource to also update currentLabel on auto-cycle
+    43→    43→- Designed and implemented premium iOS-style server switcher pill UI:
+    44→    44→  - Pill-shaped button showing "1/10 · VidAPI ▾" next to fullscreen icon
+    45→    45→  - Animated dropdown with all available servers, active indicator dot
+    46→    46→  - Glass morphism backdrop-blur, spring animations, rounded-2xl
+    47→    47→  - Click-away dismiss overlay at z-119
+    48→    48→  - Auto-close on overlay hide timer
+    49→    49→  - Hidden when only 1 source available
+    50→    50→- Added click-away dismiss for server menu
+    51→    51→- Updated retry button in error state to reset currentLabel
+    52→    52→- Lint passes (0 errors)
+    53→    53→- API response confirmed: VidSrcLink appears as 4th URL in fallback chain
+    54→    54→
+    55→    55→Stage Summary:
+    56→    56→- VidSrcLink embedder added at Tier 2 (reliable, no Cloudflare)
+    57→    57→- Server switcher UI is production-ready with premium iOS feel
+    58→    58→- All z-index layering verified (no conflicts with Watch Party PTT)
+    59→    59→- Edge cases handled (single source, empty URLs, undefined labels)
+    60→    60→
+    61→    61→---
+    62→    62→Task ID: 3
+    63→    63→Agent: Main Orchestrator
+    64→    64→Task: Fix PWA home screen icon — replace red play button with StreamVault "Z" logo
+    65→    65→
+    66→    66→Work Log:
+    67→    67→- Diagnosed root cause: scripts/generate-icons.js was generating red gradient + white play triangle icons, NOT the actual logo
+    68→    68→- Inspected public/logo.svg — dark #2D2D2D rounded square with white "Z" lettermark
+    69→    69→- Rewrote scripts/generate-icons.js to generate icons from the actual "Z" logo design
+    70→    70→- Generated all icon sizes: icon-192.png, icon-512.png, apple-touch-icon.png, favicon-32.png
+    71→    71→- Created scripts/generate-maskable-icon.js for maskable PWA variant with proper safe zone padding
+    72→    72→- Generated maskable icons: icon-maskable-192.png, icon-maskable-512.png
+    73→    73→- Updated public/manifest.json: split icons into "any" (4 entries) and "maskable" (4 entries) purposes — was incorrectly "any maskable" combined
+    74→    74→- Bumped service worker version v16 → v17 to force cache refresh on existing installs
+    75→    75→- Updated sv_sw_v16 → sv_sw_v17 force flag in layout.tsx
+    76→    76→- Browser verified: all icons display dark square + white "Z", no red play button
+    77→    77→- Lint: 0 errors (1 pre-existing warning in VideoPlayer)
+    78→    78→
+    79→    79→Stage Summary:
+    80→    80→- PWA icons now match the StreamVault brand (dark #2D2D2D + white "Z")
+    81→    81→- Maskable icons have proper safe zone for Android circular masks
+    82→    82→- Manifest properly declares separate "any" and "maskable" icon entries
+    83→    83→- SW version bump ensures existing users get the new icons on next load
+    84→    84→
+    85→    85→---
+    86→    86→Task ID: 4
+    87→    87→Agent: Main Orchestrator
+    88→    88→Task: Fix all 10 identified Watch Party issues (3 critical, 5 medium, 2 low)
+    89→    89→
+    90→    90→Work Log:
+    91→    91→- Fix 8 (Low): Removed dead Socket.IO types (WpClientEvents, WpServerEvents) from watch-party-types.ts — unused remnants of earlier architecture
+    92→    92→- Fix 10 (Low): Simplified redundant memberStatus fallback `(member.isHost ? 'joined' : 'joined')` → `'joined'` in WatchPartyRoom.tsx
+    93→    93→- Fix 9 (Low): Deduplicated leaveParty/endParty in store — both now call shared `_resetParty()` internal action
+    94→    94→- Fix 1 (Critical): Reduced MAX_CLIP_BASE64_SIZE from 256KB to 64KB in voice-clip.ts — stays within Supabase Realtime free-tier limits. Added MAX_RECORDING_DURATION_MS = 5000 with auto-stop timer and proper cleanup in stopRecording/abort
+    95→    95→- Fix 4 (Medium): Increased HOST_ABSENCE_TIMEOUT_MS from 1s to 15s — gives host time to reconnect after brief network hiccup before auto-ending party
+    96→    96→- Fix 5 (Medium): Increased MEMBER_ABSENCE_TIMEOUT_MS from 30s to 60s — gives members more time to reconnect before host removes them
+    97→    97→- Fix 7 (Medium): Added verifyMembership() check to handleLeave in API route — was the only member-action handler missing explicit membership verification
+    98→    98→- Fix 2 (Critical): Added MAX_VOICE_PEERS = 8 cap in webrtc-voice.ts — enforced in both createOffer() and handleOffer(). Prevents mesh topology from creating N×(N-1)/2 connections beyond browser capacity. Added peerCount getter and static MAX_VOICE_PEERS for UI access
+    99→    99→- Fix 6 (Medium): Added iOS audio ducking notice and voice peer limit warning in WatchPartyRoom PTT section. Imported isIOSDevice from voice-clip.ts
+   100→   100→- Fix 3 (Critical): Added _mountId guard to use-watch-party.ts — increments on every mount, captured by async callbacks, checked before mutating state. Cleanup in useEffect return tears down all resources and resets counters. Prevents stale callbacks from StrictMode/HMR double-mounting
+   101→   101→- Bonus fix: Fixed splash screen deadlock in StreamVaultApp.tsx — removed configReady gate from splashDone so app degrades gracefully when Supabase env vars are missing (shows login screen instead of permanent splash)
+   102→   102→- Updated stale log messages ("absent for 1s" → "absent for too long", "absent for 30s" → "absent for too long")
+   103→   103→- Lint: 0 errors, 1 pre-existing warning in VideoPlayer
+   104→   104→- Dev server: All routes returning 200, no runtime errors
+   105→   105→
+   106→   106→Stage Summary:
+   107→   107→- All 10 identified issues fixed without breaking any existing functionality
+   108→   108→- Voice clips now capped at 64KB base64 / 5s duration — safe for Supabase free-tier
+   109→   109→- WebRTC voice capped at 8 peers — mesh topology stays performant
+   110→   110→- Module-level state now guarded against stale callbacks from HMR/StrictMode
+   111→   111→- Host absence timeout 1s → 15s, member absence 30s → 60s — more resilient to network hiccups
+   112→   112→- Membership verification now covers all API route action handlers
+   113→   113→- Dead Socket.IO types removed, store deduplicated, redundant fallback simplified
+   114→   114→- Splash screen no longer deadlocks when Supabase is unconfigured
+   115→   115→
+   116→   116→---
+   117→   117→Task ID: 1
+   118→   118→Agent: main
+   119→   119→Task: Replace Logo with RetroShield + change color system from Netflix red (#E50914) to 1920s retro amber (#D97706)
+   120→   120→
+   121→   121→Work Log:
+   122→   122→- Scanned entire codebase for all red color references (found 131+ locations across 28+ files)
+   123→   123→- Created RetroShield.tsx — a custom Art Deco shield SVG component with chevron + diamond motifs
+   124→   124→- Updated globals.css: changed --color-sv-red (#E50914→#D97706), --color-sv-red-hover (#F40612→#E8930C), --primary, --destructive, --ring, --chart-1, --sidebar-primary, --sidebar-ring, player-progress thumbs, genre-chip hover
+   125→   125→- Replaced Shield from lucide-react with RetroShield in: SplashScreen, Navbar, LoginScreen, ProfilePage
+   126→   126→- Updated all hardcoded #E50914 inline styles in: Navbar, LoginScreen, ProfilePage, error.tsx, global-error.tsx
+   127→   127→- Updated #FF0000 references in VideoPlayer.tsx to #D97706 (amber equivalents)
+   128→   128→- Updated rgba(229,9,20,...) → rgba(217,119,6,...) in ProfilePage and globals.css
+   129→   129→- Updated error pages (error.tsx, global-error.tsx) with new RetroShield SVG and amber color
+   130→   130→- Updated offline.html and sw.js inline HTML to use #D97706
+   131→   131→- Updated PWA icon generator (R=217, G=119, B=6) and regenerated all icons
+   132→   132→- Updated manifest.json theme_color to #D97706
+   133→   133→- Copied new icons to src/app/icon.png and src/app/apple-icon.png
+   134→   134→- Lint check passed (0 errors, 1 pre-existing warning)
+   135→   135→- Browser verification passed on both mobile and desktop viewports
+   136→   136→
+   137→   137→Stage Summary:
+   138→   138→- Primary brand color: #E50914 (Netflix red) → #D97706 (1920s retro amber)
+   139→   139→- Hover color: #F40612 → #E8930C
+   140→   140→- Logo: Lucide Shield → Custom RetroShield (Art Deco design with chevron + diamond)
+   141→   141→- All 85+ Tailwind `sv-red` class usages automatically updated via CSS variable change
+   142→   142→- All PWA icons regenerated with amber shield
+   143→   143→- Zero remaining #E50914 references in codebase
+   144→   144→
+   145→   145→---
+   146→   146→Task ID: 5-a
+   147→   147→Agent: Explore (Structure & Config)
+   148→   148→Task: Scan project structure, config files, build/deploy setup, env, and dependencies
+   149→   149→
+   150→   150→Work Log:
+   151→   151→- Read /home/z/my-project/worklog.md to review prior orchestrator notes (Tasks 1–4)
+   152→   152→- Listed root directory incl. hidden files (.env, .gitignore, .zscripts/, .next/, upload/)
+   153→   153→- Read all root configs: package.json, next.config.ts, tsconfig.json, eslint.config.mjs, tailwind.config.ts, postcss.config.mjs, components.json, Caddyfile, .env, .gitignore
+   154→   154→- Read all .zscripts/*.sh (build.sh, dev.sh, start.sh, mini-services-{install,build,start}.sh, watchdog.sh)
+   155→   155→- Read all 7 supabase migrations (001–006, with 002 split into watch_party + profiles_rls)
+   156→   156→- Read prisma/schema.prisma + src/lib/db.ts and grepped src/ for any imports of `@/lib/db` → 0 matches
+   157→   157→- Verified @prisma/client is NOT installed in node_modules; prisma binary missing
+   158→   158→- Read public/manifest.json, public/sw.js, public/offline.html, public/robots.txt, public/logo.svg
+   159→   159→- Read scripts/generate-pwa-icons.js (note: generate-maskable-icon.js referenced in Task 3 worklog was consolidated into this single file)
+   160→   160→- Verified mini-services/ directory is empty (only .gitkeep)
+   161→   161→- Listed agent-ctx/, examples/, tool-results/, skills/, download/, db/, upload/
+   162→   162→- Verified dev server is running (dev.log shows Next.js 16.1.3 Turbopack on :3000, .zscripts/dev.pid = 926)
+   163→   163→- Grep'd package.json for db:* scripts → none defined (dev.sh & build.sh call `bun run db:push` which would fail)
+   164→   164→- Confirmed supabase.ts uses NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY (with SUPABASE_URL fallbacks) — NOT in .env
+   165→   165→
+   166→   166→Stage Summary:
+   167→   167→- Project: Next.js 16.1.3 (Turbopack) SPA, React 19, Tailwind v4, shadcn/ui (new-york style), Supabase (auth + Postgres + Realtime + Storage), Zustand state, PWA. Package manager: bun (bun.lock present, 325KB).
+   168→   168→- Directory tree (top-level): src/ (1.7M, app code) • public/ (108K, PWA assets) • supabase/migrations/ (48K, 7 SQL files) • prisma/ (8K, dead boilerplate) • scripts/ (8K, 1 icon generator) • mini-services/ (4K, EMPTY) • examples/websocket/ (20K, unused Socket.IO demo) • agent-ctx/ (20K, 4 orchestrator notes) • tool-results/ (2M, leftover grep/read outputs) • skills/ (5.6M, gitignored ClawHub skill library) • db/ (28K, dead SQLite file) • download/ (8K, 1-line README) • upload/ (empty, root-owned) • .zscripts/ (build/dev/start/watchdog + mini-services-*.sh) • .next/dev/ (Turbopack dev cache)
+   169→   169→- npm scripts (only 4, no db:* scripts): dev=`next dev -p 3000 2>&1 | tee dev.log` • build=`next build` • start=`next start` • lint=`eslint .`
+   170→   170→- 67 dependencies + 8 devDependencies. Core: next@16, react@19, @supabase/supabase-js, zustand, @tanstack/react-query, hls.js, mux.js. UI: 27 @radix-ui/* packages, shadcn/ui, framer-motion, lucide-react, sonner, vaul. Auth: @supabase/supabase-js (primary), next-auth (UNUSED per Task 1 finding). Streaming: hls.js, mux.js, socket.io-client (socket.io now unused — Supabase Realtime replaced it). AI/skills: z-ai-web-dev-sdk (listed but not imported per Task 1). Dev: tailwindcss@4, @tailwindcss/postcss, tw-animate-css, bun-types, eslint@9, typescript@5, sharp (PWA icon gen).
+   171→   171→- PRISMA IS DEAD BOILERPLATE — confirmed with 3 pieces of evidence: (1) `src/lib/db.ts` imports `@prisma/client` and instantiates `PrismaClient`, but grep across src/ for `@/lib/db` / `./db` / `../lib/db` returns ZERO importers; (2) `@prisma/client` is NOT installed in node_modules (no @prisma/ dir, no .bin/prisma); (3) `db/custom.db` (24KB SQLite) is unused. The schema.prisma (User + Post models) is the default Next.js starter template. The app uses Supabase exclusively (src/lib/supabase.ts + 7 migrations). dev.sh and build.sh call `bun run db:push` but that script doesn't exist in package.json — these scripts would FAIL if run; the dev server works because it was started directly via `bun run dev`, not dev.sh.
+   172→   172→- 7 Supabase migrations define 4 tables: (1) watchlist — per-user JSONB content items, RLS = authenticated read + owner write/delete; (2) profiles — referenced by FK but table itself is created elsewhere (likely Supabase dashboard, not in migrations); RLS = authenticated read + self insert/update; (3) watch_parties + watch_party_members — host-based RLS, host can CRUD party + invite members, members can self-join/leave, Realtime enabled; (4) user_sessions — max-2-concurrent device session tracking with 30-min stale purge function (SECURITY DEFINER). Migration 002 has TWO files (watch_party.sql + profiles_rls.sql) — numbering collision. Migration 005 and 006 supersede parts of 002/003 with idempotent DROP+CREATE patterns. No supabase/config.toml present.
+   173→   173→- mini-services/ is EMPTY (.gitkeep only) — no actual mini-services. The 4 .zscripts/mini-services-*.sh scripts handle this gracefully (skip when no package.json found).
+   174→   174→- PWA: SW version = v29 (force flag `sv_sw_v29` in layout.tsx inline <script>); CACHE_NAME = `streamvault-pwa-v4` (separate cache versioning). Manifest: name "StreamVault", theme_color #D97706, background #080808, display standalone, 5 icons (3 "any" + 2 "maskable"). SW strategies: install pre-cache app shell + /_next/static/ assets; navigate = stale-while-revalidate → offline.html → inline fallback; /_next/static = cache-first; /api/stream/* = SWR; /api/auth/* = passthrough. WARM_CACHE message handler for runtime cache warming.
+   175→   175→- Security config (next.config.ts): securityHeaders on ALL responses — X-Content-Type-Options: nosniff, X-Frame-Options: DENY (overridden to ALLOWALL on /api/stream/embed), Referrer-Policy: strict-origin-when-cross-origin, Permissions-Policy: camera=(), microphone=(self), geolocation=(), payment=(), HSTS max-age=31536000. CSP applied to page responses only (excludes api/_next/sw.js/manifest/icons). CSP allows 'unsafe-inline'+'unsafe-eval' scripts (needed for layout.tsx inline SW registration), permissive frame-src (40+ streaming embed domains), connect-src to *.supabase.co + wss://*.supabase.co, media-src blob: https:.
+   176→   176→- .env contains ONLY `DATABASE_URL=file:/home/z/my-project/db/custom.db` (Prisma SQLite, unused). NO Supabase env vars in .env — supabase.ts has sophisticated fallback chain (explicit init from Server Component → window.__SV_CONFIG__ → build-time env vars → throws if missing). App degrades gracefully when Supabase unconfigured (splash screen bypassed, shows login). .gitignore ignores .env* so real secrets go in .env.local.
+   177→   177→- Anomalies / dead code: (a) prisma/ + src/lib/db.ts + db/custom.db all dead; (b) dev.sh & build.sh call non-existent `bun run db:push`; (c) next-auth, socket.io-client, z-ai-web-dev-sdk listed in deps but unused (per Task 1); (d) tailwind.config.ts content paths point to ./pages, ./components, ./app — but actual code is in src/app, src/components (Tailwind v4 auto-detects via @tailwindcss/postcss so this is harmless legacy); (e) eslint.config.mjs disables almost all rules (very permissive); (f) examples/websocket/ is unused Socket.IO demo; (g) tool-results/ has 2MB of leftover grep/read outputs from prior agent runs; (h) upload/ is an empty root-owned dir with epoch-0 timestamp; (i) k6-streamvault-test.js at root is a load-test script.
+   178→   178→
+   179→   179→---
+   180→   180→Task ID: 5-b
+   181→   181→Agent: Explore (API & Backend)
+   182→   182→Task: Scan all API routes, backend services, lib/ utilities, and server-side logic
+   183→   183→
+   184→   184→Work Log:
+   185→   185→- Read /home/z/my-project/worklog.md to review prior agents' findings (Tasks 1–4, 5-a)
+   186→   186→- Listed /src/app/api/, /src/lib/, /src/types/, /src/store/, /src/services/, /examples/websocket/
+   187→   187→- Read every route.ts under /src/app/api/ (25 files incl. dynamic routes for detail/[id], season/[id]/[season], genre/[id])
+   188→   188→- Read all 18 server-side / shared modules under /src/lib/: supabase, db, tmdb, rate-limit, session-manager, download-service, download-storage, hls-downloader (1086 lines), ts-to-mp4, transmux, subtitle-fetcher, watch-party-types, webrtc-voice (1252 lines), voice-clip, fmp4-mse-player, hls-memory-loader, image-utils, utils
+   189→   189→- Read /src/types/{supabase.ts, streaming.ts, muxjs.d.ts}, /src/services/api.ts (304 lines)
+   190→   190→- Read /src/store/{index.ts (678 lines), watch-party.ts (264 lines)}
+   191→   191→- Read /examples/websocket/{server.ts (137 lines), frontend.tsx (196 lines)}
+   192→   192→- Read hooks/use-watch-party.ts scan via Grep for Realtime channels, timeouts, mount-guard (file is 2939 lines, NOT in scope but needed to confirm watch-party backend wiring)
+   193→   193→- Grep verification: `z-ai-web-dev-sdk` → 0 hits in src/, `next-auth|getServerSession|NextAuth` → 0 hits in src/, `socket.io-client` → 0 hits in src/ (only in examples/), `@prisma/client|@/lib/db` → only the dead db.ts itself, `supabase.channel` → 1 hit (hooks/use-watch-party.ts, the single source of all Realtime logic)
+   194→   194→
+   195→   195→Stage Summary:
+   196→   196→
+   197→   197→=== COMPLETE API ROUTE INVENTORY (25 route files, ~30 handler functions) ===
+   198→   198→
+   199→   199→**Top-level (8 routes):**
+   200→   200→1. GET /api                                  → health check ({message:"Hello, world!"}); no auth, no rate-limit
+   201→   201→2. GET /api/config                           → returns {supabaseUrl, supabaseAnonKey, tmdbConfigured} from runtime env; TMDB keys NEVER exposed; rate-limit=config (20/min); Cache-Control: no-store
+   202→   202→3. POST /api/auth/change-password            → verify JWT via supabase.auth.getUser, then re-auth with email+currentPassword, then supabase.auth.updateUser({password}); password policy ≥8 chars + letter + digit; rate-limit=auth (10/min)
+   203→   203→4. POST /api/auth/session                    → device session heartbeat/register (see Session Management below); rate-limit=auth
+   204→   204→5. DELETE /api/auth/session                  → remove device session on logout; rate-limit=auth
+   205→   205→6. GET /api/subtitles                        → proxy to SubDL + OpenSubtitles (server-side API keys); resolves TMDB→IMDB via TMDB API; CORS `*`; force-dynamic; NO auth, NO rate-limit (oversight); OPTIONS preflight
+   206→   206→7. GET /api/turn-credentials                 → fetches OpenRelay (metered.ca) dynamic TURN creds (5s timeout), falls back to hardcoded FALLBACK_TURN_SERVERS (a.relay.metered.ca:443 username e8dd40493c68fd6b89b3a4a7 credential 5FKF+pDtzP1K2PKB); STUN = 5x Google + 2x others; NO auth, NO rate-limit; NO cache headers (client caches 4h)
+   207→   207→8. GET /api/users                            → list all profiles (id, email, display_name, avatar_url, role, created_at, updated_at) + active watch-party memberships; uses service-role client if SUPABASE_SERVICE_ROLE_KEY set (bypasses RLS), else authed client with caller JWT; rate-limit=user (30/min)
+   208→   208→9. POST /api/watch-party                     → all watch-party DB ops via service-role client (see Watch Party Backend below); rate-limit=user
+   209→   209→10. GET /api/watchlist                       → list user's watchlist items (RLS via caller JWT); rate-limit=watchlist
+   210→   210→11. PUT /api/watchlist                       → full-replace watchlist (delete+insert); rate-limit=watchlist
+   211→   211→12. DELETE /api/watchlist?content_id=        → remove single item; rate-limit=watchlist
+   212→   212→
+   213→   213→**Stream sub-routes (/api/stream/*, 14 routes):**
+   214→   214→13. GET /api/stream                          → generic TMDB proxy with ALLOWED_TMDB_PATH_PREFIXES allowlist (16 prefixes), blocks `..` and `//`, no auth, rate-limit=content (120/min), Cache-Control: public s-maxage=300 swr=600
+   215→   215→14. GET /api/stream/source                   → STREAM SOURCE RESOLUTION (see below); rate-limit=source (30/min)
+   216→   216→15. GET /api/stream/embed?url=               → AD-BLOCKING EMBED PROXY (see below); rate-limit=embed (30/min)
+   217→   217→16. GET /api/stream/proxy?url=[&referer=]    → CORS BYPASS PROXY for HLS segments + images (see below); rate-limit=proxy (300/min); also HEAD handler for size probing
+   218→   218→17. GET /api/stream/trending                 → TMDB /trending/{type}/week, rate-limit=content
+   219→   219→18. GET /api/stream/popular                  → TMDB /{type}/popular, rate-limit=content
+   220→   220→19. GET /api/stream/top-rated                → TMDB /{type}/top_rated, rate-limit=content
+   221→   221→20. GET /api/stream/new-releases             → parallel TMDB /movie/now_playing + /tv/on_the_air, merges by popularity; rate-limit=content
+   222→   222→21. GET /api/stream/search?q=                → TMDB /search/multi, rate-limit=search (60/min); TmdbError → 504/502
+   223→   223→22. GET /api/stream/genres?type=             → TMDB /genre/{type}/list, rate-limit=content, Cache-Control: stable (s-maxage=3600 swr=86400)
+   224→   224→23. GET /api/stream/genre/[id]               → TMDB /discover/{type}?with_genres={id}&sort_by=popularity.desc, rate-limit=content
+   225→   225→24. GET /api/stream/detail/[id]?type=        → TMDB /{type}/{id}?append_to_response=credits,similar,videos, rate-limit=content; 404 pass-through
+   226→   226→25. GET /api/stream/season/[id]/[season]     → TMDB /tv/{id}/season/{season}, rate-limit=content
+   227→   227→26. GET /api/stream/catalog/movies?page=     → proxies https://vidapi.ru/movies/latest/page-N.json; force-dynamic; rate-limit=content
+   228→   228→27. GET /api/stream/catalog/tvshows?page=    → proxies https://vidapi.ru/tvshows/latest/page-N.json; rate-limit=content
+   229→   229→28. GET /api/stream/catalog/episodes?page=   → proxies https://vidapi.ru/episodes/latest/page-N.json; rate-limit=content
+   230→   230→
+   231→   231→Most routes also export OPTIONS preflight returning CORS 204. Per-route caching varies: `next: { revalidate: 300 }` for TMDB via tmdbFetch(); Cache-Control headers (CACHE.content = public s-maxage=300 swr=600, CACHE.stable = s-maxage=3600 swr=86400, CACHE.private = private no-cache no-store). Force-dynamic on /config, /stream, /source, /embed, /proxy, /catalog/*. No middleware.ts exists — auth is per-route via Authorization: Bearer JWT verified with supabase.auth.getUser(token).
+   232→   232→
+   233→   233→=== STREAM SOURCE RESOLUTION CHAIN (/api/stream/source) ===
+   234→   234→Provider config (hardcoded — "Only working providers, no Cloudflare-blocked domains"):
+   235→   235→1. VidAPI (vidapi.ru) — primary embed URL (movie: https://vidapi.ru/embed/movie/{id}, tv: https://vidapi.ru/embed/tv/{id}/{season}/{episode}), quality hint "1080p"
+   236→   236→2. Embed.su — secondary embed URL, quality hint "720p"
+   237→   237→3. Vaplayer streamdata API (https://streamdata.vaplayer.ru/api.php?tmdb=&type=&season=&episode=) — fetches direct HLS m3u8 stream_urls (provider:"vidapi", quality:"1080p" for justhd.tv, "auto" otherwise); 8s timeout; User-Agent spoofed; Referer: brightpathsignals.com
+   238→   238→Response shape: {embedUrl, quality:"1080p", fallbackUrls:[embed.su], sources:[{url,quality,type:"hls",provider:"vidapi"}], providersChecked:2, providerMap:{url→"vidapi"}}
+   239→   239→NOTE: Worklog Task 2 mentioned adding VidSrcLink (vidsrc.link) as Tier 2 + adding it to ALLOWED_HOSTS — but the CURRENT source route only includes vidapi.ru + embed.su. VidSrcLink was either reverted or never landed; ALLOWED_HOSTS in /api/stream/embed also does NOT include vidsrc.link. Task 2 worklog appears stale vs actual code.
+   240→   240→
+   241→   241→=== EMBED PROXY (/api/stream/embed) ===
+   242→   242→- ALLOWED_HOSTS = ['vidapi.ru', 'vaplayer.ru', 'embed.su'] (does NOT include vidsrc.link despite Task 2 worklog claim)
+   243→   243→- Fetches embed HTML with spoofed UA + Referer = ${origin}/, 15s timeout, follows redirects
+   244→   244→- If response not ok OR HTML contains 'challenge-platform'/'Just a moment' (Cloudflare) → 302 redirect to direct URL (server can't bypass CF JS challenge)
+   245→   245→- Injects <base href="${origin}/"> for relative URLs
+   246→   246→- AD-BLOCKING: (a) stripAdScripts() removes <script src=...> from 27 ad domains + inline scripts matching 23 keywords (popunder, clickadu, propeller, adblock, etc.); (b) stripAdIframes() removes <iframe src=...> from 18 ad domains; (c) injectAdBlockers() prepends <style> with massive CSS selector list (ad-, ads-, adv-, sponsor, popup, interstitial, VidSrc/VidAPI specific patterns, anti-adblock bypass, force-hide rule) + inline <script> that overrides window.open, intercepts location.assign/replace (only allows same-host or .m3u8), click-event captor that blocks target=_blank anchors, MutationObserver removing ad iframes/scripts, 1s setInterval cleanup
+   247→   247→- Response headers: Content-Type: text/html, Access-Control-Allow-Origin: *, Cache-Control: public max-age=600, Content-Security-Policy: "default-src * 'unsafe-inline' 'unsafe-eval' data: blob: https: http:; media-src * https: blob: data: http:; frame-src * https:; child-src * https:;", X-Frame-Options: ALLOWALL (overrides next.config.ts DENY)
+   248→   248→- On timeout/abort → 302 redirect to direct URL as fallback
+   249→   249→
+   250→   250→=== HLS PROXY (/api/stream/proxy) ===
+   251→   251→- ALLOWED_DOMAINS (27 hosts): image.tmdb.org, vidapi.ru, vaplayer.ru, streamdata.vaplayer.ru, brightpathsignals.com, vidsrc.{to,pm,me,cc,xyz,icu}, vidsrcme.{ru,su}, vidsrc-embed.{ru,su}, vidsrc-me.{ru,su}, vsrc.su, embed.su, 2embed.cc, www.2embed.cc, multiembed.mov, playembed.site, vidstream.to, moviesapi.club, justhd.tv, remoteconsultinggroup.site, lightning-fast-streaming.com, trailers.to, rabbitstream.net, playtube.ws, superstream.one, tosstream.cc
+   252→   252→- SSRF protection: blocks localhost, 127.0.0.1, ::1, 10.*, 192.168.*, 172.*, 0.0.0.0
+   253→   253→- CDN_REFERER_FALLBACKS (15 origins) tried in priority order: matching-domain referers first, then caller's explicit referer, then remaining fallbacks, then no-referer
+   254→   254→- 403 hotlink-protection retries up to MAX_403_RETRIES=3; 502/503 retries up to MAX_UPSTREAM_RETRIES=2 with UPSTREAM_RETRY_DELAY_MS=1000 progressive
+   255→   255→- TEXT_CONTENT_TYPES (application/vnd.apple.mpegurl, application/x-mpegurl, application/json) buffered as text; everything else streamed as binary (note: text/html intentionally NOT in text list — HLS CDNs serve binary .ts segments with text/html content type)
+   256→   256→- GET + HEAD methods (HEAD for size probing by HLS downloader)
+   257→   257→- Response: Access-Control-Allow-Origin: *, Cache-Control: public max-age=3600, X-RateLimit-Remaining header
+   258→   258→
+   259→   259→=== DOWNLOAD PIPELINE ARCHITECTURE (HLS→MP4 remux, IndexedDB, offline playback) ===
+   260→   260→Layered design (download-service.ts orchestrator → hls-downloader.ts engine → ts-to-mp4.ts remuxer → download-storage.ts IndexedDB):
+   261→   261→
+   262→   262→1. **Queue & orchestration** (download-service.ts):
+   263→   263→   - FIFO queue (`_queue: string[]`), single download at a time (`_isProcessing`), survives navigation via module-level state
+   264→   264→   - `_controllers: Map<taskId, AbortController>` for cancellation
+   265→   265→   - `_blobCache: Map<taskId, Blob>` for immediate post-download playback (NOT in Zustand — React 19 structuredClone fails on large Blobs "Share too large")
+   266→   266→   - `cleanupStaleTasks()` on app startup resets 'downloading'/'pending' tasks to 'error'
+   267→   267→   - `orchestrateDownload(config)`: dedupe guard (existing task for same content+season+episode), creates pending task, queues, fetches poster via proxy → savePosterToStorage, calls _processQueue
+   268→   268→   - `_executeDownload(task)`: fetchStreamSources(contentId, mediaType, season, episode) → priority 1: downloadLinks[].url (MP4), priority 2: HLS sources (find type:hls & quality!=auto, else type:hls, else first) → startHlsDownload with onProgress callback (throttled by store to ~4/sec), referer hint from embedUrl.origin
+   269→   269→   - Post-download validation: MIN_VIDEO_BYTES=1MB; logs blob.type/size; if HLS & blob.type='video/mp4' → success path; if HLS & !mp4 → warn fallback
+   270→   270→   - Saves blob to IndexedDB via saveBlob(taskId, blob); saves subtitles via saveSubtitle(taskId, lang, vtt)
+   271→   271→   - Optional auto-save to user's chosen download folder (File System Access API): creates movies/{title}/ or series/{title}/season_{XX}/episode_{YY}/ structure, writes video + subtitle files
+   272→   272→   - External subtitle fallback (fire-and-forget): if savedSubtitles empty, fetchExternalSubtitles(contentId, mediaType, preferredSubtitles, season, episode) via /api/subtitles route → saves VTT to IndexedDB + disk folder
+   273→   273→
+   274→   274→2. **HLS engine** (hls-downloader.ts, 1086 lines):
+   275→   275→   - MAX_CONCURRENT_REQUESTS=4 global semaphore across ALL downloads (prevents Vercel 503)
+   276→   276→   - PER_DOWNLOAD_CONCURRENCY=3 workers per download
+   277→   277→   - fetchWithRetry: 5 retries on {502,503,429}, exponential backoff 2s→12s cap
+   278→   278→   - INTER_SEGMENT_DELAY_MS=300 normal, AGGRESSIVE_INTER_DELAY_MS=1500 after CONSECUTIVE_FAILURE_THRESHOLD=3
+   279→   279→   - Second-pass retry: up to 10 attempts per failed segment with progressive 2s×attempt delay
+   280→   280→   - validateSegmentData: rejects empty/HTML responses, checks TS sync byte (0x47) or MP4 ftyp box (0x66747970), warns on unknown formats
+   281→   281→   - parseM3u8: handles master playlists (variants + #EXT-X-MEDIA subtitles) + media playlists (segments with #EXTINF durations + #EXT-X-DISCONTINUITY)
+   282→   282→   - selectVariant: 'auto'/'1080p' → highest bandwidth, '720p' → ~2-4 Mbps, '480p' → lowest 30%
+   283→   283→   - Returns DownloadResult {blob, segmentBuffers, segmentMeta:[{offset,size,duration,discontinuity}], subtitles:Record<lang,vtt>, subtitleTracks}
+   284→   284→   - **Remux path**: imports @/lib/ts-to-mp4 → remuxTsToMp4(segmentBuffers, taskId) → produces video/mp4 blob; post-remux integrity check (≥100KB, ftyp box first 4-8 bytes); on failure falls back to raw TS blob (type video/mp2t) + MemoryHlsLoader path
+   285→   285→   - VTT subtitle merging: parses #EXT-X-MEDIA TYPE=SUBTITLES, downloads each track's segments, merges with WEBVTT header + parseLastVttTimestamp + adjustVttTimestamps for multi-segment continuity
+   286→   286→
+   287→   287→3. **TS→MP4 remuxer** (ts-to-mp4.ts):
+   288→   288→   - Uses mux.js Transmuxer with `keepOriginalTimestamps: true` (CRITICAL — false causes silent data drop, was root cause of 60MB output from 160MB input)
+   289→   289→   - Caches RemuxSegments {initSegment, dataSegments[]} per taskId for direct MSE playback
+   290→   290→   - 3 integrity checks: (1) output ratio ≥50% of input (else throw), (2) warn if <70%, (3) empty-segment ratio ≤30% (else throw), (4) init segment must start with ftyp box (0x66747970)
+   291→   291→   - Logs extensive diagnostics ([SV Remux] prefix)
+   292→   292→
+   293→   293→4. **transmux.ts** (alternative, mostly unused): transmuxWholeBlob (1MB chunks through single Transmuxer), transmuxSegmentsToMp4 (per-segment, deprecated). NOT called by download-service which uses ts-to-mp4.ts directly.
+   294→   294→
+   295→   295→5. **IndexedDB storage** (download-storage.ts):
+   296→   296→   - DB_NAME='streamvault-offline', DB_VERSION=1, single STORE_NAME='downloads' (no key path — caller provides keys)
+   297→   297→   - Keys: `{taskId}` (blob), `{taskId}:sub:{lang}` (VTT), `poster:{contentId}` (image), `avatar:{userId}` (image), `dir-handle:download-folder` (FileSystemDirectoryHandle)
+   298→   298→   - Functions: saveBlob/loadBlob/deleteBlob/hasBlob/clearAllBlobs, saveSubtitle/loadSubtitle, savePoster/loadPoster/deletePoster, saveAvatar/loadAvatar, saveDirectoryHandle/loadDirectoryHandle/removeDirectoryHandle
+   299→   299→
+   300→   300→6. **Offline playback** (fmp4-mse-player.ts + hls-memory-loader.ts):
+   301→   301→   - fmp4-mse-player.ts (697 lines): 3 entry points — setupFmp4MseProgressive (RECOMMENDED, appends in batches w/ buffer eviction to avoid QuotaExceededError), setupFmp4MseFromSegments (DEPRECATED, all-at-once), setupFmp4Mse (DEPRECATED, parses blob then all-at-once). ProgressiveMseHandle exposes appendNext/evictBefore/getBufferedAhead/getBufferedBehind/cleanup
+   302→   302→   - hls-memory-loader.ts (318 lines): custom HLS.js Loader serving segments from in-memory Blob via blob.slice().arrayBuffer() (avoids "Share too large" errors). URL scheme: mem://{playbackId}/playlist.m3u8 + mem://{playbackId}/seg/{index}. registerPlayback/unregisterPlayback module-level Map. Validates all segment offsets against blob.size.
+   303→   303→
+   304→   304→7. **Zustand store** (store/index.ts useDownloadStore, persisted as 'streamvault-downloads'): tasks[] with throttle (scheduleProgressUpdate at 250ms = ~4/sec; flushProgressUpdate for terminal states). removeTask also deletes IndexedDB blob + poster (if no other tasks share contentId).
+   305→   305→
+   306→   306→=== WATCH PARTY BACKEND ===
+   307→   307→
+   308→   308→**Server-side (/api/watch-party/route.ts, 835 lines, POST-only):**
+   309→   309→- Uses module-level Supabase clients: `supabase` (anon, for JWT verify only) + `admin` (service-role, bypasses RLS for ALL data ops — comment explicitly states "RLS policies may be misconfigured or not applied; service role bypasses RLS, making invite flow reliable regardless of Supabase dashboard state")
+   310→   310→- Input validation: UUID_RE regex, MAX_STRING_LENGTH=500, MAX_CONTENT_TITLE_LENGTH=200, MAX_PARTY_MEMBERS=20
+   311→   311→- Auth via verifyAuth(request, body) — accepts Authorization: Bearer JWT OR body.token (fallback)
+   312→   312→- Membership verification: verifyMembership(userId, partyId) — checks party exists, status≠'ended', user has 'joined' status; verifyHost — checks host_id===userId
+   313→   313→- 13 actions dispatched via switch: create, invite, accept, reject, leave, end, pick-content, start, pause, play, seek, sync, remove-member
+   314→   314→- handleCreate: cleans up stale 'waiting' parties for this host, inserts new party (status='waiting', playback_time=0, is_playing=false), inserts host as 'joined' member, returns party object with members[] including host profile
+   315→   315→- handleInvite: enforces MAX_PARTY_MEMBERS=20, checks target not already in any active party, upserts member with status='invited'
+   316→   316→- handleAccept: atomic UPDATE WHERE status='invited' (prevents accepting non-invited), returns full party with members
+   317→   317→- handleLeave: requires verifyMembership (added in Task 4 Fix 7)
+   318→   318→- handleEnd / handleRemoveMember: requires verifyHost
+   319→   319→- handlePickContent / handleStart / handleSync: host-only
+   320→   320→- handlePause / handlePlay / handleSeek: any joined member
+   321→   321→- fetchPartyWithMembers: joins watch_parties + watch_party_members + profiles
+   322→   322→- All handlers return NextResponse.json; no explicit Cache-Control on POST (defaults to no-cache)
+   323→   323→
+   324→   324→**Client-side Realtime (hooks/use-watch-party.ts, 2939 lines):**
+   325→   325→- **3 Supabase Realtime channels per user**:
+   326→   326→  1. `wp-invites-${userId}` — broadcast event 'wp' for incoming invitations (subscribe once per user, persists across parties)
+   327→   327→  2. `wp-party-${partyId}` — main party channel with 4 subscriptions:
+   328→   328→     - postgres_changes: UPDATE on watch_parties WHERE id=eq.{partyId} (DB-driven state sync)
+   329→   329→     - broadcast 'wp': 16 event types (WpInviteEvent, WpInviteRejectedEvent, WpMemberJoinedEvent, WpMemberLeftEvent, WpContentPickedEvent, WpPartyStartedEvent, WpPausedEvent, WpPlayedEvent, WpSeekedEvent, WpEndedEvent, WpSyncEvent, WpPttStartEvent, WpPttStopEvent, WpProfileUpdatedEvent, WpWebrtcOfferEvent, WpWebrtcAnswerEvent, WpWebrtcIceEvent)
+   330→   330→     - presence 'sync' / 'join' / 'leave' (member presence tracking)
+   331→   331→  3. `wp-invites-${targetUserId}` — outbound: dynamically created by host to send invite to target user (subscribed just to send broadcast, then closed)
+   332→   332→- **REST fallback**: channel.send() returns a Promise when WebSocket silently dies and falls back to REST; detectRestFallback() detects this and retries. Also httpSend() is called twice on party-leave teardown (once via WS, once via HTTP keepalive) to maximize delivery reliability
+   333→   333→- **Timeouts** (in use-watch-party.ts):
+   334→   334→  - TALKING_TIMEOUT_MS = 10_000 — auto-clear stuck speaking indicator
+   335→   335→  - HOST_ABSENCE_TIMEOUT_MS = 15_000 (raised from 1s in Task 4 Fix 4) — host absence triggers party end
+   336→   336→  - MEMBER_ABSENCE_TIMEOUT_MS = 60_000 (raised from 30s in Task 4 Fix 5) — member absence triggers host-initiated removal
+   337→   337→- **StrictMode/HMR guard**: _mountId counter incremented on every mount; captured by async callbacks; checked before mutating state (Task 4 Fix 3)
+   338→   338→- **Voice**: WebRTC mesh via WebRtcVoiceManager (webrtc-voice.ts, 1252 lines) for non-iOS; voice clips via VoiceClipRecorder + Supabase broadcast (voice-clip.ts, 423 lines) for iOS
+   339→   339→  - MAX_VOICE_PEERS = 8 enforced in createOffer() and handleOffer() (Task 4 Fix 2)
+   340→   340→  - Polite-peer glare resolution: lexicographically larger userId is polite (rolls back local offer on simultaneous offers)
+   341→   341→  - m-line order mismatch recovery: destroys + recreates peer connection on setRemoteDescription failure
+   342→   342→  - ICE config fetched from /api/turn-credentials, cached 4h, falls back to STUN-only (5x Google)
+   343→   343→  - Voice clip limits (voice-clip.ts): MAX_CLIP_BASE64_SIZE=64KB (Task 4 Fix 1, was 256KB), MAX_RECORDING_DURATION_MS=5000 with auto-stop timer
+   344→   344→  - Voice clip playback: iOS uses AudioContext (created during PTT gesture, stays warm), others use HTMLAudioElement
+   345→   345→
+   346→   346→=== SESSION MANAGEMENT (max 2 devices) ===
+   347→   347→- **Server (/api/auth/session/route.ts)**: MAX_SESSIONS=2, STALE_THRESHOLD_MINUTES=120 (2h, was 30min — raised to prevent false evictions for mobile/iOS PWA backgrounding)
+   348→   348→- POST flow: verify JWT → parse body (session_id, device_info, force, heartbeat) → purge stale sessions (DELETE WHERE last_active < cutoff) → fetch active sessions → if existing session & !force: heartbeat UPDATE last_active; if force: DELETE all + INSERT new; if heartbeat & !currentSession: return {active:false, evicted:true} (signal logout); if sessions.length ≥ MAX_SESSIONS: 403 with reason; else INSERT new
+   349→   349→- DELETE flow: verify JWT → DELETE WHERE user_id=userId AND session_id=body.session_id
+   350→   350→- **Fail-open policy**: DB errors return {active:true, tracked:false} — never locks users out
+   351→   351→- **Client (session-manager.ts)**: getDeviceSessionId() generates UUID stored in localStorage 'sv_device_session_id'; getAuthToken() reads localStorage 'streamvault-auth-token' directly (synchronous, avoids supabase.auth.getSession() hang race); HEARTBEAT_INTERVAL_MS=10s; visibilitychange listener triggers immediate heartbeat on tab refocus; if heartbeat returns evicted → onEvicted() signs out; if stale-purge (no row) → tries registerSession(false) re-registration before eviction
+   352→   352→- supabase.ts migration 005 has purge_stale_sessions() SQL function (SECURITY DEFINER) — but the API route does its own inline purge, doesn't call the SQL function
+   353→   353→
+   354→   354→=== RATE LIMITING (rate-limit.ts) ===
+   355→   355→- In-memory sliding-window Map<ip, {timestamps:number[]}> — no external deps, no Redis
+   356→   356→- Cleanup every 5 minutes, removes timestamps older than 10 min, deletes empty entries
+   357→   357→- rateLimit(ip, config) returns {allowed, remaining, resetMs}; pushes timestamp only if allowed
+   358→   358→- rateLimitResponse returns 429 with Retry-After, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset headers
+   359→   359→- getClientIp: x-forwarded-for[0] → x-real-ip → 'unknown'
+   360→   360→- RATE_LIMITS presets (per minute):
+   361→   361→  - content: 120 (browse routes)
+   362→   362→  - search: 60
+   363→   363→  - source: 30
+   364→   364→  - proxy: 300 (HLS segment downloads)
+   365→   365→  - embed: 30
+   366→   366→  - auth: 10 (brute-force protection)
+   367→   367→  - config: 20
+   368→   368→  - user: 30
+   369→   369→  - watchlist: 30
+   370→   370→- **Limitations**: in-memory only — on Vercel serverless, each cold-start instance has its own Map (no cross-instance coordination). Multiple parallel instances can collectively allow N× the limit. Acceptable for free-tier defense; not a hard guarantee.
+   371→   371→
+   372→   372→=== VERIFICATIONS ===
+   373→   373→
+   374→   374→**z-ai-web-dev-sdk**: CONFIRMED NOT IMPORTED. Grep across /home/z/my-project/src returns 0 hits. Listed in package.json but unused — safe to remove from dependencies.
+   375→   375→
+   376→   376→**next-auth**: CONFIRMED NOT USED. Grep for `next-auth|getServerSession|NextAuth` across /home/z/my-project/src returns 0 hits. Listed in package.json but unused. Auth is 100% Supabase Auth (supabase.auth.getUser JWT verification per route).
+   377→   377→
+   378→   378→**socket.io-client**: CONFIRMED NOT IMPORTED in src/. Only in /examples/websocket/frontend.tsx (dead demo). socket.io is in package.json but unused at runtime — Supabase Realtime replaced it. The examples/ folder is a leftover demo.
+   379→   379→
+   380→   380→**Prisma**: CONFIRMED DEAD. `@prisma/client` is imported only in /home/z/my-project/src/lib/db.ts. Grep for `@/lib/db` or `../lib/db` or `from './db'` across src/ returns 0 importers. db.ts itself imports `@prisma/client` which is NOT in node_modules. App uses Supabase exclusively via src/lib/supabase.ts (client singleton with Proxy lazy-init) + per-route createClient calls in API routes.
+   381→   381→
+   382→   382→=== SECURITY CONCERNS ===
+   383→   383→
+   384→   384→1. **Unauthenticated endpoints** (acceptable for public data but worth noting):
+   385→   385→   - GET /api (health check — no rate-limit)
+   386→   386→   - GET /api/turn-credentials (NO auth, NO rate-limit — TURN creds are public/free-tier so low risk, but the hardcoded fallback TURN credentials in source code are visible to anyone reading the repo)
+   387→   387→   - GET /api/subtitles (NO auth, NO rate-limit — could be abused to hammer SubDL/OpenSubtitles APIs)
+   388→   388→   - GET /api/stream/* (NO auth — by design, content browsing is public; rate-limit is per-IP)
+   389→   389→   - GET /api/stream/proxy (NO auth — SSRF-protected via allowlist but allowlist has 27 domains including some that could be probed)
+   390→   390→
+   391→   391→2. **Hardcoded TURN credentials** (/api/turn-credentials/route.ts lines 22-33): username `e8dd40493c68fd6b89b3a4a7` + credential `5FKF+pDtzP1K2PKB` committed to source. These are Open Relay free-tier creds that "rotate periodically and may expire" per the comment — but exposing them in client-reachable code is unnecessary.
+   392→   392→
+   393→   393→3. **Service-role key usage** bypasses RLS for ALL watch-party and users endpoints. The comment in watch-party/route.ts explicitly states this is intentional because "RLS policies may be misconfigured". This means:
+   394→   394→   - /api/users GET exposes ALL profiles (id, email, display_name, avatar_url) to ANY authenticated user — not just admins. Comment says "Admin uses service-role... Non-admin uses service-role client if available" — both paths actually use service-role if SUPABASE_SERVICE_ROLE_KEY is set. Any authenticated user can enumerate all user emails.
+   395→   395→   - /api/watch-party POST with action='invite' lets any authenticated user invite any other user by user_id (no consent flow before invite broadcast)
+   396→   396→   - /api/watch-party POST with action='remove-member' — host-only enforced server-side (good)
+   397→   397→   - /api/watch-party POST with action='pick-content'/'start'/'end'/'sync' — host-only enforced (good)
+   398→   398→   - /api/watch-party POST with action='pause'/'play'/'seek' — any joined member (good)
+   399→   399→
+   400→   400→4. **No CSRF protection** on POST routes. Auth is via Authorization: Bearer header (not cookies) so CSRF is mitigated by design — but /api/auth/session and /api/watch-party accept body.token as fallback to Authorization header, which could weaken this if any caller passes token in body.
+   401→   401→
+   402→   402→5. **CSP is permissive on /api/stream/embed**: "default-src * 'unsafe-inline' 'unsafe-eval' data: blob: https: http:" — necessary for embed player compatibility but allows arbitrary script execution inside the iframe. Mitigated by ad-block JS that intercepts window.open, location.assign/replace, and removes ad iframes/scripts via MutationObserver.
+   403→   403→
+   404→   404→6. **X-Frame-Options: ALLOWALL** on /api/stream/embed (overrides next.config.ts DENY). Necessary for iframe embedding but means the proxy page can be embedded by any origin (CSP doesn't restrict frame-ancestors).
+   405→   405→
+   406→   406→7. **Subtitles route logs warnings at startup** if TMDB_API_KEY / SUBDL_API_KEY / OPENSUBTITLES_API_KEY are missing — these go to server logs only, not exposed to client.
+   407→   407→
+   408→   408→8. **PWA service worker caches /api/stream/* with SWR strategy** — could serve stale content but doesn't cache auth endpoints.
+   409→   409→
+   410→   410→=== DEAD CODE / UNUSED EXPORTS ===
+   411→   411→
+   412→   412→1. **src/lib/db.ts** — entire file is dead. Imports @prisma/client (not installed), exports `db` constant, no importers anywhere.
+   413→   413→2. **prisma/schema.prisma** + **db/custom.db** (SQLite) — dead boilerplate per agent 5-a's findings.
+   414→   414→3. **examples/websocket/server.ts + frontend.tsx** — Socket.IO demo, NOT referenced anywhere in src/. The frontend.tsx imports @/components/ui/{button,input,card,scroll-area} so it could be mounted as a page but no route.ts/page.tsx imports it. Dead demo.
+   415→   415→4. **src/lib/transmux.ts** — exports transmuxWholeBlob, transmuxSegmentsToMp4, transmuxSingleSegment. download-service.ts and hls-downloader.ts import remuxTsToMp4 from ts-to-mp4.ts instead. Comments in transmux.ts say "transmuxWholeBlob: prefer this" and "transmuxSegmentsToMp4: deprecated" — but neither is called. Likely vestigial from before ts-to-mp4.ts was written.
+   416→   416→5. **src/lib/fmp4-mse-player.ts** — setupFmp4Mse and setupFmp4MseFromSegments are explicitly marked DEPRECATED in comments (only setupFmp4MseProgressive is recommended). Need to grep components to confirm if deprecated ones are still called.
+   417→   417→6. **src/types/supabase.ts** Functions.get_my_profile — declared but route doesn't exist (no /api/profile or RPC call found in API routes; supabase.ts uses .from('profiles').select() directly).
+   418→   418→7. **src/services/api.ts StreamSourceResponse.embedUrl comment** says "vidsrc.to" but actual /api/stream/source returns vidapi.ru — stale comment.
+   419→   419→8. **Task 2 worklog claim** about adding VidSrcLink (vidsrc.link) is NOT reflected in current code — /api/stream/source has only vidapi.ru + embed.su, /api/stream/embed ALLOWED_HOSTS has only 3 entries (vidapi.ru, vaplayer.ru, embed.su), no vidsrc.link. Either the change was reverted or the worklog was aspirational.
+   420→   420→
+   421→   421→

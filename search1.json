@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://www.youtube.com/watch?v=LgVk7rks-40",
+    "name": "Building a Free Movie Streaming Site with NextJS 15, and TMDb API",
+    "snippet": "Learn how to build a fully functional movie streaming website from scratch using Next.js, TMDb API for movie data, and VidSrc for streaming.",
+    "host_name": "www.youtube.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/learnprogramming/comments/1esy7m7/is_there_an_apisome_kind_of_site_where_i_can",
+    "name": "Is there an api/some kind of site where I can access videos/movies",
+    "snippet": "I haven't seen one that provides free access to legal streaming movies, mainly because of licensing issues and the high cost of streaming. If ...",
+    "host_name": "www.reddit.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/Ahmed-Maher77/MovieStreamAR___Arabic-Language-Movie-Discovery-App",
+    "name": "Ahmed-Maher77/MovieStreamAR___Arabic-Language  - GitHub",
+    "snippet": "A modern Arabic-Language movie discovery platform built with React.js that allows users to browse, search, and manage movies and TV series.",
+    "host_name": "github.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://iclr.cc/virtual/2025/papers.html",
+    "name": "ICLR 2025 Papers",
+    "snippet": "MaskBit: Embedding-free Image Generation via Bit Tokens · Connectome Mapping ... Fast and Slow Streams for Online Time Series Forecasting Without Information ...",
+    "host_name": "iclr.cc",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.youtube.com/watch?v=aRGdDy18qfY",
+    "name": "Learn HTML iframes in 3 minutes 🖼️ - YouTube",
+    "snippet": "Embedding is usually forbidden using CSP headers to prevent “clickjacking”. 8:39 · Go to channel Bro Code ...",
+    "host_name": "www.youtube.com",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.afi.com/afis-100-years-100-movies-10th-anniversary-edition",
+    "name": "AFI'S 100 YEARS100 MOVIES — 10TH ANNIVERSARY EDITION",
+    "snippet": "1. Citizen Kane (1941) 2. The Godfather (1972) 3. Casablanca (1942) 4. Raging Bull (1980) 5. Singin' in the Rain (1952) 6. Gone with",
+    "host_name": "www.afi.com",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.amazon.com/Instant-Video/b?_encoding=UTF8&benefitId=vdpfilusrp3d3sp21we&node=2858778011",
+    "name": "Watch FilmDoo on Prime Video - Amazon.com",
+    "snippet": "Subscribe to FilmDoo on Prime Video for hit series, blockbuster movies, and more - all in one app.",
+    "host_name": "www.amazon.com",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.epiphan.com/?srsltid=AfmBOoqyV3nhE4CCA66qS70udrh_67i6nngYAKaeYtE_m9_qvpINHMEn",
+    "name": "Epiphan Video: Hardware encoders, frame grabbers, and more for",
+    "snippet": "Power your video productions with Epiphan's intuitive and innovative hardware encoders, capture cards, cloud management, and automatic live transcription.",
+    "host_name": "www.epiphan.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://html.spec.whatwg.org",
+    "name": "HTML Standard",
+    "snippet": "... API ... The term is used to refer both to Document objects and their descendant DOM trees, and to serialized byte streams using the HTML syntax or the XML syntax, ...",
+    "host_name": "html.spec.whatwg.org",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.pbs.org",
+    "name": "PBS: Public Broadcasting Service",
+    "snippet": "Watch full episodes of your favorite PBS dramas, find in-depth news analysis and explore documentaries on history, science, art and more!",
+    "host_name": "www.pbs.org",
+    "rank": 9,
+    "date": "",
+    "favicon": ""
+  }
+]

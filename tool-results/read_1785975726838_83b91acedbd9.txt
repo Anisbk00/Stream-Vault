@@ -1,0 +1,2002 @@
+     1→/**
+     2→ * Movera — Watch Party Realtime Hook (Supabase)
+     3→ *
+     4→ * Architecture:
+     5→ *   - Server-side API route (/api/watch-party) for ALL DB writes
+     6→ *     using the Supabase service role key (bypasses RLS)
+     7→ *   - Client-side Supabase for Realtime channels (Broadcast + Presence)
+     8→ *   - Client-side Supabase for SELECT reads (RLS allows authenticated reads)
+     9→ *   - DB poll on auth for offline invites + active party rejoin
+    10→ */
+    11→
+    12→'use client'
+    13→
+    14→import { useEffect, useCallback } from 'react'
+    15→import { supabase } from '@/lib/supabase'
+    16→import { useWatchPartyStore } from '@/store/watch-party'
+    17→import { useAuthStore, getAuthToken } from '@/store'
+    18→import { toast } from 'sonner'
+    19→import type { RealtimeChannel } from '@supabase/supabase-js'
+    20→import type {
+    21→  WatchPartyData,
+    22→  WatchPartyInvitation,
+    23→  PartyMember,
+    24→} from '@/lib/watch-party-types'
+    25→import {
+    26→  WebRtcVoiceManager,
+    27→  type WpWebrtcOfferEvent,
+    28→  type WpWebrtcAnswerEvent,
+    29→  type WpWebrtcIceEvent,
+    30→  type WpWebrtcEvent,
+    31→} from '@/lib/webrtc-voice'
+    32→import {
+    33→  isIOSDevice,
+    34→  VoiceClipRecorder,
+    35→  playVoiceClip,
+    36→  stopAllVoiceClips,
+    37→  encodeClipToBase64,
+    38→  initAudioContext,
+    39→  cleanupAudioContext,
+    40→  type WpVoiceClipEvent,
+    41→} from '@/lib/voice-clip'
+    42→
+    43→// ── Module-level channel state ─────────────────────────────
+    44→let _invitesChannel: RealtimeChannel | null = null
+    45→let _partyChannel: RealtimeChannel | null = null
+    46→let _currentPartyId: string | null = null
+    47→let _subscribedUserId: string | null = null
+    48→let _voiceManager: WebRtcVoiceManager | null = null
+    49→let _syncInterval: ReturnType<typeof setInterval> | null = null
+    50→let _keepaliveInterval: ReturnType<typeof setInterval> | null = null
+    51→let _syncInProgress = false
+    52→let _contentHealInterval: ReturnType<typeof setInterval> | null = null
+    53→let _lastChannelRecreation = 0 // Timestamp of last channel recreation (cooldown)
+    54→let _pttHeld = false // tracks whether the user is physically holding PTT — survives async boundaries
+    55→let _clipRecorder: VoiceClipRecorder | null = null // iOS-only: records voice clips during PTT hold
+    56→let _pttStoppedUsers = new Set<string>() // userIds that sent ptt-stop; prevents presence sync from re-activating talking state. Only cleared by ptt-start or party leave.
+    57→let _talkingTimeouts = new Map<string, ReturnType<typeof setTimeout>>() // Safety timeouts for stuck speaking indicators. Cleared when ptt-stop is received.
+    58→
+    59→// ── Mount guard ───────────────────────────────────────────────
+    60→// Prevents stale async callbacks from a previous React mount (StrictMode / HMR)
+    61→// from mutating state after the hook has re-mounted. Every mount increments
+    62→// this counter; callbacks check their captured mountId against the current value.
+    63→let _mountId = 0
+    64→const TALKING_TIMEOUT_MS = 10_000 // 10 seconds — auto-clear stuck speaking indicator if no ptt-stop received
+    65→/**
+    66→ * Whether the voice manager has been initialized (mic accessed).
+    67→ * On iOS/Android WebView, creating RTCPeerConnection with an audio transceiver
+    68→ * before getUserMedia switches AVAudioSession to PlayAndRecord, which suppresses
+    69→ * all other audio output (iframe video, etc.). To prevent this, we gate all
+    70→ * createOffer() calls behind this flag — no peer connections are created until
+    71→ * the user explicitly presses PTT (which calls init() first).
+    72→ */
+    73→let _voiceReady = false
+    74→let _hostLeftAt: number | null = null // Timestamp when host presence was last seen leaving
+    75→let _hostLeftTimer: ReturnType<typeof setTimeout> | null = null // Timer to auto-end party when host is gone too long
+    76→const HOST_ABSENCE_TIMEOUT_MS = 15_000 // 15 seconds — gives host time to reconnect after brief network hiccup
+    77→let _memberLeftTimers = new Map<string, ReturnType<typeof setTimeout>>() // Per-member absence timers (host-side)
+    78→const MEMBER_ABSENCE_TIMEOUT_MS = 60_000 // 60 seconds — gives members time to reconnect (was 30s, too aggressive)
+    79→
+    80→// ── REST fallback detection ────────────────────────────────
+    81→// When the Supabase WebSocket silently dies, channel.send() falls back to
+    82→// REST without throwing. We detect this by checking if send() returns a
+    83→// thenable (Promise). If we see 3+ REST fallbacks in a 10s window, the
+    84→// WebSocket is confirmed dead and we recreate the channel.
+    85→let _restFallbackCount = 0
+    86→let _restFallbackResetTimer: ReturnType<typeof setTimeout> | null = null
+    87→const REST_FALLBACK_THRESHOLD = 3 // consecutive REST sends before recreating channel
+    88→const REST_FALLBACK_WINDOW_MS = 10_000 // time window for counting consecutive REST sends
+    89→
+    90→function detectRestFallback(channel: RealtimeChannel, result: unknown): void {
+    91→  // channel.send() returns a Promise when it falls back to REST.
+    92→  // When using WebSocket, it returns undefined or a non-thenable.
+    93→  if (result && typeof result === 'object' && 'then' in result) {
+    94→    _restFallbackCount++
+    95→    if (_restFallbackResetTimer) clearTimeout(_restFallbackResetTimer)
+    96→    _restFallbackResetTimer = setTimeout(() => {
+    97→      _restFallbackCount = 0
+    98→    }, REST_FALLBACK_WINDOW_MS)
+    99→
+   100→    if (_restFallbackCount >= REST_FALLBACK_THRESHOLD) {
+   101→      _restFallbackCount = 0
+   102→      if (_restFallbackResetTimer) clearTimeout(_restFallbackResetTimer)
+   103→      // WebSocket is dead — recreate the channel to restore WS connection
+   104→      if (channel === _partyChannel) {
+   105→        console.warn('[WatchParty] Detected sustained REST fallback — recreating party channel')
+   106→        recreatePartyChannel()
+   107→      } else if (channel === _invitesChannel) {
+   108→        console.warn('[WatchParty] Detected sustained REST fallback — recreating invites channel')
+   109→        recreateInvitesChannel()
+   110→      }
+   111→    }
+   112→  } else {
+   113→    // send() used WebSocket — reset counter
+   114→    _restFallbackCount = 0
+   115→    if (_restFallbackResetTimer) clearTimeout(_restFallbackResetTimer)
+   116→  }
+   117→}
+   118→
+   119→/** Clear the safety timeout for a talking indicator (called when ptt-stop is received). */
+   120→function clearTalkingTimeout(userId: string): void {
+   121→  const existing = _talkingTimeouts.get(userId)
+   122→  if (existing) {
+   123→    clearTimeout(existing)
+   124→    _talkingTimeouts.delete(userId)
+   125→  }
+   126→}
+   127→
+   128→// ── Broadcast helper with error handling ────────────────────
+   129→// Centralizes all Supabase Realtime broadcast sends with:
+   130→//   - Always tries WebSocket first (fast, real-time)
+   131→//   - Falls back to httpSend() for that specific message when WebSocket is down
+   132→//   - Schedules channel resubscribe to recover WebSocket connection
+   133→//
+   134→// IMPORTANT: We do NOT track a global "WebSocket connected" flag.
+   135→// The old approach had a shared _wsConnected flag that, once set to false
+   136→// by ANY channel's disconnect, permanently disabled WebSocket sends for
+   137→// ALL channels. This caused a cascade failure: one channel's WebSocket
+   138→// drop → all channels fall back to REST → WebRTC signaling becomes
+   139→// unreliable → ICE negotiation fails → no voice + no PTT indicators.
+   140→
+   141→// Track channels that are pending resubscription to avoid duplicate attempts
+   142→const _resubscribePending = new WeakSet<RealtimeChannel>()
+   143→
+   144→function wpBroadcast(
+   145→  channel: RealtimeChannel | null,
+   146→  payload: WpBroadcastEvent,
+   147→  label: string,
+   148→): void {
+   149→  if (!channel) {
+   150→    console.warn(`[WatchParty] Broadcast skipped (${label}): no channel`)
+   151→    return
+   152→  }
+   153→
+   154→  try {
+   155→    const result = channel.send({
+   156→      type: 'broadcast',
+   157→      event: 'wp',
+   158→      payload,
+   159→    })
+   160→    // Detect if send() fell back to REST (returns a Promise when REST,
+   161→    // undefined/thenable when WebSocket). If sustained REST detected,
+   162→    // recreate the channel to restore WebSocket connectivity.
+   163→    detectRestFallback(channel, result)
+   164→    return
+   165→  } catch {
+   166→    // send() threw — WebSocket is likely down, try httpSend as fallback
+   167→    try {
+   168→      channel.httpSend('wp', payload).then((res: { success: boolean; error?: string }) => {
+   169→        if (res.success === false) {
+   170→          console.error(`[WatchParty] httpSend failed (${label}):`, res.error)
+   171→        }
+   172→      }).catch((err: Error) => {
+   173→        console.error(`[WatchParty] httpSend error (${label}):`, err.message)
+   174→      })
+   175→      // Schedule resubscribe since send() threw (WebSocket definitely down)
+   176→      scheduleChannelResubscribe(channel)
+   177→    } catch {
+   178→      // Completely failed — nothing more we can do
+   179→    }
+   180→  }
+   181→}
+   182→
+   183→/** Schedule a channel resubscribe to recover the WebSocket connection. */
+   184→function scheduleChannelResubscribe(channel: RealtimeChannel): void {
+   185→  if (_resubscribePending.has(channel)) return
+   186→  _resubscribePending.add(channel)
+   187→
+   188→  // Wait 2 seconds before resubscribing to avoid hammering the server
+   189→  // if multiple broadcasts fail in quick succession (e.g., ICE candidates)
+   190→  setTimeout(() => {
+   191→    _resubscribePending.delete(channel)
+   192→    const state = channel.state
+   193→    // Supabase Realtime uses 'joined' for the subscribed state.
+   194→    // Valid states: 'closed', 'closing', 'joined', 'joining', 'leaving', 'timed_out'
+   195→    if (state === 'joined') return
+   196→
+   197→    // CRITICAL: channel.subscribe() can only be called ONCE per channel
+   198→    // instance. If the channel state is 'closed' or 'timed_out', the
+   199→    // underlying WebSocket is dead and subscribe() will throw
+   200→    // 'tried to join multiple times'. The only fix is to create a
+   201→    // brand-new channel instance.
+   202→    if (channel === _partyChannel) {
+   203→      console.log('[WatchParty] Party channel dead (state:', state, ') — recreating channel')
+   204→      recreatePartyChannel()
+   205→    } else if (channel === _invitesChannel) {
+   206→      console.log('[WatchParty] Invites channel dead (state:', state, ') — recreating channel')
+   207→      recreateInvitesChannel()
+   208→    }
+   209→  }, 2000)
+   210→}
+   211→
+   212→/**
+   213→ * Recreate the party channel when the WebSocket dies.
+   214→ * Supabase Realtime's subscribe() can only be called once per channel instance.
+   215→ * When the channel reaches 'closed' or 'timed_out', the only option is
+   216→ * to create a fresh channel. This preserves the voice manager and peer
+   217→ * connections — only the signaling transport is replaced.
+   218→ */
+   219→function recreatePartyChannel(): void {
+   220→  if (!_currentPartyId) return
+   221→  // Cooldown: don't recreate more than once every 10 seconds.
+   222→  // Cascading recreations (REST fallback → recreate → fail → recreate)
+   223→  // were causing a 429 rate limit storm on the API.
+   224→  const now = Date.now()
+   225→  if (now - _lastChannelRecreation < 10_000) return
+   226→  _lastChannelRecreation = now
+   227→
+   228→  const partyId = _currentPartyId
+   229→  const userId = useAuthStore.getState().user?.id
+   230→  if (!userId) return
+   231→  const profile = useAuthStore.getState().profile
+   232→
+   233→  // Preserve the voice manager across channel recreation.
+   234→  // unsubscribePartyChannel destroys the voice manager, but during
+   235→  // a recreation we only need a new signaling transport — the
+   236→  // existing WebRTC peer connections should survive. Destroying
+   237→  // them mid-PTT causes NPE crashes and permanent voice loss.
+   238→  const savedVoiceManager = _voiceManager
+   239→  const savedVoiceReady = _voiceReady
+   240→
+   241→  // Remove dead channel so subscribePartyChannel doesn't early-return.
+   242→  _partyChannel = null
+   243→  // Temporarily null the voice manager so unsubscribePartyChannel skips it
+   244→  _voiceManager = null
+   245→  _voiceReady = false
+   246→
+   247→  subscribePartyChannel(partyId, userId, profile?.display_name || 'Unknown', profile?.avatar_url || null)
+   248→
+   249→  // subscribePartyChannel creates a new voice manager because _voiceManager
+   250→  // was null. But we want to KEEP the existing one (with its established
+   251→  // peer connections). Restore the saved manager and destroy the new one.
+   252→  if (savedVoiceManager) {
+   253→    if (_voiceManager && _voiceManager !== savedVoiceManager) {
+   254→      // A new manager was created — destroy it and restore the saved one
+   255→      _voiceManager.destroy()
+   256→    }
+   257→    _voiceManager = savedVoiceManager
+   258→    _voiceReady = savedVoiceReady
+   259→    // Update signal sender to use the new channel
+   260→    if (_partyChannel) {
+   261→      _voiceManager.setSignalSender((targetUserId, signal) => {
+   262→        if (!_partyChannel) return
+   263→        let payload: WpWebrtcEvent
+   264→        switch (signal.type) {
+   265→          case 'offer':
+   266→            payload = { t: 'webrtc-offer', targetUserId, fromUserId: userId, sdp: signal.sdp! }
+   267→            break
+   268→          case 'answer':
+   269→            payload = { t: 'webrtc-answer', targetUserId, fromUserId: userId, sdp: signal.sdp! }
+   270→            break
+   271→          case 'ice-candidate':
+   272→            payload = { t: 'webrtc-ice', targetUserId, fromUserId: userId, candidate: signal.candidate! }
+   273→            break
+   274→        }
+   275→        wpBroadcast(_partyChannel!, payload, `webrtc-${payload.t}`)
+   276→      })
+   277→    }
+   278→    console.log('[WatchParty] Preserved voice manager across channel recreation')
+   279→  }
+   280→}
+   281→
+   282→/** Recreate the invites channel when the WebSocket dies. */
+   283→function recreateInvitesChannel(): void {
+   284→  const userId = _subscribedUserId
+   285→  if (!userId) return
+   286→  _invitesChannel = null
+   287→  _subscribedUserId = null
+   288→  subscribeInvitesChannel(userId)
+   289→}
+   290→
+   291→
+   292→// ── Broadcast event types ──────────────────────────────────
+   293→
+   294→interface WpInviteEvent {
+   295→  t: 'invite'
+   296→  partyId: string
+   297→  hostId: string
+   298→  hostName: string
+   299→  hostAvatarUrl: string | null
+   300→  memberCount: number
+   301→  targetUserId: string
+   302→}
+   303→
+   304→interface WpInviteRejectedEvent {
+   305→  t: 'invite-rejected'
+   306→  partyId: string
+   307→  userId: string
+   308→  displayName: string
+   309→  targetUserId: string
+   310→}
+   311→
+   312→interface WpMemberJoinedEvent {
+   313→  t: 'member-joined'
+   314→  member: PartyMember
+   315→}
+   316→
+   317→interface WpMemberLeftEvent {
+   318→  t: 'member-left'
+   319→  userId: string
+   320→  displayName: string
+   321→  leftBy: string // who initiated the leave (the member themselves, or the host removing them)
+   322→}
+   323→
+   324→interface WpContentPickedEvent {
+   325→  t: 'content-picked'
+   326→  contentId: string
+   327→  mediaType: 'movie' | 'tv'
+   328→  season: number | null
+   329→  episode: number | null
+   330→  contentTitle: string
+   331→  contentPoster: string | null
+   332→}
+   333→
+   334→interface WpPartyStartedEvent {
+   335→  t: 'party-started'
+   336→  currentTime: number
+   337→  contentId?: string
+   338→  mediaType?: 'movie' | 'tv'
+   339→  season?: number | null
+   340→  episode?: number | null
+   341→  contentTitle?: string
+   342→  contentPoster?: string | null
+   343→}
+   344→
+   345→interface WpPausedEvent {
+   346→  t: 'paused'
+   347→  pausedBy: string
+   348→  pausedByName: string
+   349→  currentTime: number
+   350→}
+   351→
+   352→interface WpPlayedEvent {
+   353→  t: 'played'
+   354→  currentTime: number
+   355→  resumedBy: string
+   356→  resumedByName: string
+   357→}
+   358→
+   359→interface WpSeekedEvent {
+   360→  t: 'seeked'
+   361→  currentTime: number
+   362→  seekedBy: string
+   363→  seekedByName: string
+   364→}
+   365→
+   366→interface WpEndedEvent {
+   367→  t: 'ended'
+   368→  endedBy: string
+   369→}
+   370→
+   371→interface WpSyncEvent {
+   372→  t: 'sync'
+   373→  currentTime: number
+   374→  isPlaying: boolean
+   375→  /** Timestamp (ms) when the host sent this sync — allows members to calculate one-way latency */
+   376→  sentAt: number
+   377→}
+   378→
+   379→interface WpPttStartEvent {
+   380→  t: 'ptt-start'
+   381→  userId: string
+   382→  displayName: string
+   383→}
+   384→
+   385→interface WpPttStopEvent {
+   386→  t: 'ptt-stop'
+   387→  userId: string
+   388→}
+   389→
+   390→interface WpProfileUpdatedEvent {
+   391→  t: 'profile-updated'
+   392→  userId: string
+   393→  displayName: string
+   394→  avatarUrl: string | null
+   395→}
+   396→
+   397→type WpBroadcastEvent =
+   398→  | WpInviteEvent
+   399→  | WpInviteRejectedEvent
+   400→  | WpMemberJoinedEvent
+   401→  | WpMemberLeftEvent
+   402→  | WpContentPickedEvent
+   403→  | WpPartyStartedEvent
+   404→  | WpPausedEvent
+   405→  | WpPlayedEvent
+   406→  | WpSeekedEvent
+   407→  | WpEndedEvent
+   408→  | WpSyncEvent
+   409→  | WpPttStartEvent
+   410→  | WpPttStopEvent
+   411→  | WpProfileUpdatedEvent
+   412→  | WpWebrtcOfferEvent
+   413→  | WpWebrtcAnswerEvent
+   414→  | WpWebrtcIceEvent
+   415→
+   416→// ── API helper ─────────────────────────────────────────────
+   417→
+   418→async function wpApi(
+   419→  action: string,
+   420→  payload: Record<string, unknown> = {},
+   421→): Promise<{ ok: boolean; data: Record<string, unknown>; error?: string }> {
+   422→  const token = await getAuthToken()
+   423→  if (!token) {
+   424→    return { ok: false, data: {}, error: 'Not authenticated' }
+   425→  }
+   426→
+   427→  try {
+   428→    const res = await fetch('/api/watch-party', {
+   429→      method: 'POST',
+   430→      headers: {
+   431→        'Content-Type': 'application/json',
+   432→        Authorization: `Bearer ${token}`,
+   433→      },
+   434→      body: JSON.stringify({ action, ...payload }),
+   435→    })
+   436→
+   437→    const json = await res.json()
+   438→
+   439→    if (!res.ok) {
+   440→      console.error(`[WatchParty] API error (${res.status}):`, json.error || 'Unknown error')
+   441→      return { ok: false, data: {}, error: json.error || `Request failed (${res.status})` }
+   442→    }
+   443→
+   444→    return { ok: true, data: json }
+   445→  } catch (err) {
+   446→    const message = err instanceof Error ? err.message : 'Network error'
+   447→    console.error('[WatchParty] API network error:', message)
+   448→    return { ok: false, data: {}, error: message }
+   449→  }
+   450→}
+   451→
+   452→// ── Sync debounce — prevents DB write flood ────────────────
+   453→// sendSync fires every 500ms (host broadcasts time to members).
+   454→// The DB write (for rejoin recovery) doesn't need that frequency.
+   455→// Debounce to at most once per 5 seconds.
+   456→let _lastSyncDbWrite = 0
+   457→const SYNC_DB_DEBOUNCE_MS = 5_000
+   458→
+   459→/** Timestamp of the last content-pick toast — prevents duplicate toasts
+   460→ *  when both Postgres Change and Broadcast arrive for the same content. */
+   461→let _lastContentPickToastAt = 0
+   462→const CONTENT_PICK_TOAST_DEDUP_MS = 3_000
+   463→
+   464→/** Most recent sync broadcast's sentAt timestamp (ms) — used by members for latency compensation */
+   465→let _lastSyncSentAt = 0
+   466→
+   467→function debouncedSyncToDb(partyId: string, currentTime: number, isPlaying: boolean): void {
+   468→  const now = Date.now()
+   469→  if (now - _lastSyncDbWrite < SYNC_DB_DEBOUNCE_MS) return
+   470→  _lastSyncDbWrite = now
+   471→  wpApi('sync', { partyId, currentTime, isPlaying }).catch(() => { /* non-critical */ })
+   472→}
+   473→
+   474→// ── DB helpers (SELECT only — RLS allows these) ────────────
+   475→
+   476→async function fetchPartyFromDb(partyId: string): Promise<WatchPartyData | null> {
+   477→  try {
+   478→    const { data: party, error } = await supabase
+   479→      .from('watch_parties')
+   480→      .select('*')
+   481→      .eq('id', partyId)
+   482→      .maybeSingle()
+   483→
+   484→    if (error || !party) return null
+   485→
+   486→    const { data: memberRows } = await supabase
+   487→      .from('watch_party_members')
+   488→      .select('user_id, status')
+   489→      .eq('party_id', partyId)
+   490→      .in('status', ['joined', 'invited'])
+   491→
+   492→    const memberUserIds = (memberRows || []).map((m) => m.user_id)
+   493→    const memberStatusMap = new Map((memberRows || []).map((m) => [m.user_id, m.status]))
+   494→
+   495→    const { data: profiles } = await supabase
+   496→      .from('profiles')
+   497→      .select('id, display_name, avatar_url')
+   498→      .in('id', memberUserIds.length > 0 ? memberUserIds : ['__none__'])
+   499→
+   500→    const profileMap = new Map((profiles || []).map((p) => [p.id, p]))
+   501→
+   502→    const partyMembers: PartyMember[] = memberUserIds.map((uid) => {
+   503→      const profile = profileMap.get(uid)
+   504→      return {
+   505→        userId: uid,
+   506→        displayName: profile?.display_name || 'Unknown',
+   507→        avatarUrl: profile?.avatar_url || null,
+   508→        isHost: uid === party.host_id,
+   509→        isTalking: false,
+   510→        memberStatus: (memberStatusMap.get(uid) as 'joined' | 'invited') || 'joined' as const,
+   511→      }
+   512→    })
+   513→
+   514→    return {
+   515→      id: party.id,
+   516→      hostId: party.host_id,
+   517→      contentId: party.content_id,
+   518→      mediaType: party.media_type as 'movie' | 'tv' | null,
+   519→      season: party.season,
+   520→      episode: party.episode,
+   521→      contentTitle: party.content_title,
+   522→      contentPoster: party.content_poster,
+   523→      status: party.status as 'waiting' | 'playing' | 'ended',
+   524→      members: partyMembers,
+   525→      playbackState: {
+   526→        isPlaying: party.is_playing,
+   527→        currentTime: party.playback_time || 0,
+   528→        duration: 0,
+   529→        pausedBy: party.paused_by,
+   530→      },
+   531→      createdAt: new Date(party.created_at).getTime(),
+   532→    }
+   533→  } catch {
+   534→    return null
+   535→  }
+   536→}
+   537→
+   538→async function fetchPendingInvites(userId: string): Promise<WatchPartyInvitation[]> {
+   539→  try {
+   540→    const { data: memberRows } = await supabase
+   541→      .from('watch_party_members')
+   542→      .select('party_id')
+   543→      .eq('user_id', userId)
+   544→      .eq('status', 'invited')
+   545→
+   546→    if (!memberRows || memberRows.length === 0) return []
+   547→
+   548→    const invitations: WatchPartyInvitation[] = []
+   549→    for (const row of memberRows) {
+   550→      const party = await fetchPartyFromDb(row.party_id)
+   551→      if (!party || party.status === 'ended') continue
+   552→
+   553→      const hostMember = party.members.find((m) => m.isHost)
+   554→      invitations.push({
+   555→        partyId: row.party_id,
+   556→        hostId: party.hostId,
+   557→        hostName: hostMember?.displayName || 'Unknown',
+   558→        hostAvatarUrl: hostMember?.avatarUrl || null,
+   559→        memberCount: party.members.length,
+   560→        receivedAt: Date.now(),
+   561→      })
+   562→    }
+   563→    return invitations
+   564→  } catch {
+   565→    return []
+   566→  }
+   567→}
+   568→
+   569→async function checkActiveParty(userId: string) {
+   570→  try {
+   571→    // Guard: if already in a party with an active channel, don't overwrite state.
+   572→    // This prevents auth token refreshes from destroying the current party session.
+   573→    const currentStore = useWatchPartyStore.getState()
+   574→    if (currentStore.isInParty && _partyChannel && _currentPartyId) {
+   575→      return
+   576→    }
+   577→
+   578→    const { data: memberRows } = await supabase
+   579→      .from('watch_party_members')
+   580→      .select('party_id')
+   581→      .eq('user_id', userId)
+   582→      .eq('status', 'joined')
+   583→      .order('joined_at', { ascending: false })
+   584→      .limit(1)
+   585→
+   586→    if (!memberRows || memberRows.length === 0) return
+   587→
+   588→    const partyId = memberRows[0].party_id
+   589→    const partyData = await fetchPartyFromDb(partyId)
+   590→
+   591→    if (!partyData || partyData.status === 'ended') {
+   592→      // Clean up stale membership via API
+   593→      await wpApi('leave', { partyId })
+   594→      return
+   595→    }
+   596→
+   597→    const store = useWatchPartyStore.getState()
+   598→    store.setCurrentParty(partyData)
+   599→    useWatchPartyStore.setState({
+   600→      isHost: partyData.hostId === userId,
+   601→      isRoomVisible: true,
+   602→      partyStartTime: partyData.playbackState.currentTime,
+   603→    })
+   604→
+   605→    const profile = useAuthStore.getState().profile
+   606→    subscribePartyChannel(partyId, userId, profile?.display_name || 'Unknown', profile?.avatar_url || null)
+   607→  } catch {
+   608→    // Silent — don't block app load
+   609→  }
+   610→}
+   611→
+   612→// ── Channel management ─────────────────────────────────────
+   613→
+   614→function subscribeInvitesChannel(userId: string) {
+   615→  if (_invitesChannel && _subscribedUserId === userId) return
+   616→
+   617→  unsubscribeInvitesChannel()
+   618→
+   619→  _subscribedUserId = userId
+   620→
+   621→  try {
+   622→    // Per-user invite channel — each user only receives their own invites.
+   623→    // Previous design used a shared 'wp-invites' channel where ALL users
+   624→    // received ALL invite payloads (privacy leak). Now each user subscribes
+   625→    // to their own channel, so they only see invites targeting them.
+   626→    _invitesChannel = supabase.channel(`wp-invites-${userId}`, {
+   627→      config: { broadcast: { self: false } },
+   628→    })
+   629→
+   630→    _invitesChannel.on('broadcast', { event: 'wp' }, (payload: { payload: WpBroadcastEvent }) => {
+   631→      const event = payload.payload
+   632→      const store = useWatchPartyStore.getState()
+   633→
+   634→      if (event.t === 'invite') {
+   635→        // Double-check targetUserId matches (defense in depth)
+   636→        if (event.targetUserId === userId) {
+   637→          store.addInvitation({
+   638→            partyId: event.partyId,
+   639→            hostId: event.hostId,
+   640→            hostName: event.hostName,
+   641→            hostAvatarUrl: event.hostAvatarUrl,
+   642→            memberCount: event.memberCount,
+   643→            receivedAt: Date.now(),
+   644→          })
+   645→        }
+   646→      }
+   647→
+   648→      if (event.t === 'invite-rejected') {
+   649→        if (event.targetUserId === userId) {
+   650→          toast.info(`${event.displayName} declined your watch party invitation`)
+   651→          store.removeInvitation(event.partyId)
+   652→        }
+   653→      }
+   654→    })
+   655→
+   656→    _invitesChannel.subscribe((status) => {
+   657→      if (status === 'SUBSCRIBED') {
+   658→        console.log('[WatchParty] Invites channel subscribed successfully')
+   659→        _restFallbackCount = 0
+   660→      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSE') {
+   661→        console.error('[WatchParty] Invites channel disconnected:', status)
+   662→        // Retry after 5 seconds — must recreate the channel since
+   663→        // subscribe() can only be called once per instance
+   664→        setTimeout(() => {
+   665→          if (_invitesChannel) {
+   666→            console.log('[WatchParty] Invites channel dead — recreating')
+   667→            recreateInvitesChannel()
+   668→          }
+   669→        }, 5000)
+   670→      }
+   671→    })
+   672→  } catch (err) {
+   673→    console.error('[WatchParty] Invites channel creation failed:', err instanceof Error ? err.message : err)
+   674→    _invitesChannel = null
+   675→    _subscribedUserId = null
+   676→  }
+   677→}
+   678→
+   679→function unsubscribeInvitesChannel() {
+   680→  if (_invitesChannel) {
+   681→    try { supabase.removeChannel(_invitesChannel) } catch { /* already removed */ }
+   682→    _invitesChannel = null
+   683→  }
+   684→  _subscribedUserId = null
+   685→}
+   686→
+   687→function subscribePartyChannel(
+   688→  partyId: string,
+   689→  userId: string,
+   690→  displayName: string,
+   691→  avatarUrl: string | null,
+   692→  onSubscribed?: () => void,
+   693→) {
+   694→  if (_partyChannel && _currentPartyId === partyId) return
+   695→
+   696→  unsubscribePartyChannel()
+   697→
+   698→  _currentPartyId = partyId
+   699→
+   700→  try {
+   701→    _partyChannel = supabase.channel(`wp-party-${partyId}`, {
+   702→      config: {
+   703→        broadcast: { self: false },
+   704→        presence: { key: userId },
+   705→      },
+   706→    })
+   707→
+   708→    // ── Start content-heal interval IMMEDIATELY (not inside subscribe) ──
+   709→    // CRITICAL: Previously this interval was only created inside the
+   710→    // subscribe() callback when status === 'SUBSCRIBED'. If the WebSocket
+   711→    // never connects (common on PWA/mobile/unstable networks), the
+   712→    // interval never starts, and members are stuck with stale data:
+   713→    // no content, no status updates, no auto-play. This is the root
+   714→    // cause of "content doesn't appear for members" and "start doesn't
+   715→    // work for members". Starting it here ensures DB polling runs
+   716→    // regardless of WebSocket state.
+   717→    if (_contentHealInterval) { clearInterval(_contentHealInterval); _contentHealInterval = null }
+   718→    _contentHealInterval = setInterval(async () => {
+   719→      if (!_currentPartyId || _syncInProgress) return
+   720→      const store = useWatchPartyStore.getState()
+   721→      if (!store.currentParty) return
+   722→
+   723→      // Fast path: detect party ended (host closed app).
+   724→      try {
+   725→        const { data: statusRow } = await supabase
+   726→          .from('watch_parties')
+   727→          .select('status')
+   728→          .eq('id', _currentPartyId)
+   729→          .maybeSingle()
+   730→        if (statusRow?.status === 'ended') {
+   731→          toast.info('Watch party has ended')
+   732→          store.leaveParty()
+   733→          unsubscribePartyChannel()
+   734→          return
+   735→        }
+   736→      } catch { /* non-critical */ }
+   737→
+   738→      // Check content + status from DB.
+   739→      _syncInProgress = true
+   740→      try {
+   741→        const { data: contentRow, error: contentError } = await supabase
+   742→          .from('watch_parties')
+   743→          .select('content_id, media_type, season, episode, content_title, content_poster, is_playing, playback_time, status')
+   744→          .eq('id', _currentPartyId)
+   745→          .maybeSingle()
+   746→
+   747→        if (contentError || !contentRow) return
+   748→        const current = useWatchPartyStore.getState()
+   749→        if (!current.currentParty) return
+   750→
+   751→        // Sync content if DB has content that differs from local
+   752→        if (contentRow.content_id && contentRow.content_id !== current.currentParty.contentId) {
+   753→          current.setPartyContent({
+   754→            contentId: contentRow.content_id,
+   755→            mediaType: contentRow.media_type as 'movie' | 'tv',
+   756→            season: contentRow.season,
+   757→            episode: contentRow.episode,
+   758→            contentTitle: contentRow.content_title || '',
+   759→            contentPoster: contentRow.content_poster,
+   760→          })
+   761→          // After setPartyContent, re-check is_playing from the same query
+   762→          if (contentRow.is_playing) {
+   763→            useWatchPartyStore.getState().setPlaybackState({ isPlaying: true, currentTime: contentRow.playback_time || 0 })
+   764→          }
+   765→        } else if (!contentRow.content_id && current.currentParty.contentId) {
+   766→          // Host cleared content — unlikely but handle it
+   767→        }
+   768→
+   769→        // ── Sync party status (waiting → playing) ──────────────────
+   770→        // CRITICAL FIX: Previously the content-heal interval only synced
+   771→        // content_id. It did NOT sync the party status or is_playing flag.
+   772→        // This meant that when the host clicked "Start" (changing status
+   773→        // from 'waiting' to 'playing'), the member's store stayed at
+   774→        // status='waiting' even though the DB had status='playing'.
+   775→        // Without status='playing', the auto-play effect never triggers
+   776→        // and the member's video never starts.
+   777→        const dbStatus = contentRow.status as 'waiting' | 'playing' | 'ended'
+   778→        if (dbStatus && dbStatus !== current.currentParty.status) {
+   779→          console.log('[WatchParty] Content-heal: status changed from', current.currentParty.status, 'to', dbStatus)
+   780→          current.setPartyStatus(dbStatus)
+   781→          // When party transitions to 'playing', set partyStartTime so
+   782→          // the auto-play effect triggers correctly for the member.
+   783→          if (dbStatus === 'playing') {
+   784→            useWatchPartyStore.getState().setPartyStartTime(contentRow.playback_time || 0)
+   785→          }
+   786→        }
+   787→
+   788→        // Sync is_playing even when content hasn't changed.
+   789→        // The host may have started the party (is_playing: true) without
+   790→        // changing content. Without this sync, members stuck at
+   791→        // isPlaying=false would never start playing.
+   792→        const dbIsPlaying = contentRow.is_playing
+   793→        const dbPlaybackTime = contentRow.playback_time || 0
+   794→        if (dbIsPlaying !== current.currentParty.playbackState.isPlaying) {
+   795→          console.log('[WatchParty] Content-heal: isPlaying changed from', current.currentParty.playbackState.isPlaying, 'to', dbIsPlaying)
+   796→          current.setPlaybackState({
+   797→            isPlaying: dbIsPlaying,
+   798→            currentTime: dbPlaybackTime,
+   799→          })
+   800→        }
+   801→
+   802→        // Sync member statuses from DB.
+   803→        try {
+   804→          const { data: memberRows } = await supabase
+   805→            .from('watch_party_members')
+   806→            .select('user_id, status')
+   807→            .eq('party_id', _currentPartyId)
+   808→            .in('status', ['joined', 'invited'])
+   809→
+   810→          if (!memberRows || memberRows.length === 0) return
+   811→          const dbStatusMap = new Map(memberRows.map((m) => [m.user_id, m.status]))
+   812→          const localMembers = current.currentParty.members
+   813→          let needsUpdate = false
+   814→          const updatedMembers = localMembers.map((m) => {
+   815→            const dbMemberStatus = dbStatusMap.get(m.userId)
+   816→            if (!dbMemberStatus) return m
+   817→            if (m.memberStatus === 'invited' && dbMemberStatus === 'joined') {
+   818→              needsUpdate = true
+   819→              return { ...m, memberStatus: 'joined' as const }
+   820→            }
+   821→            return m
+   822→          })
+   823→          const localIds = new Set(localMembers.map((m) => m.userId))
+   824→          const newDbMembers = memberRows.filter((m) => !localIds.has(m.user_id) && m.status === 'joined')
+   825→          if (newDbMembers.length > 0) {
+   826→            const newIds = newDbMembers.map((m) => m.user_id)
+   827→            const { data: profiles } = await supabase
+   828→              .from('profiles')
+   829→              .select('id, display_name, avatar_url')
+   830→              .in('id', newIds)
+   831→            const profileMap = new Map((profiles || []).map((p) => [p.id, p]))
+   832→            for (const row of newDbMembers) {
+   833→              const profile = profileMap.get(row.user_id)
+   834→              updatedMembers.push({
+   835→                userId: row.user_id,
+   836→                displayName: profile?.display_name || 'Unknown',
+   837→                avatarUrl: profile?.avatar_url || null,
+   838→                isHost: row.user_id === current.currentParty.hostId,
+   839→                isTalking: false,
+   840→                memberStatus: 'joined',
+   841→              })
+   842→              needsUpdate = true
+   843→            }
+   844→          }
+   845→          const dbIds = new Set(memberRows.map((m) => m.user_id))
+   846→          const removedMembers = updatedMembers.filter((m) => !dbIds.has(m.userId))
+   847→          if (removedMembers.length > 0) {
+   848→            needsUpdate = true
+   849→          }
+   850→          if (needsUpdate) {
+   851→            current.setMembers(updatedMembers.filter((m) => dbIds.has(m.userId)))
+   852→          }
+   853→        } catch { /* non-critical */ }
+   854→      } catch { /* non-critical */ } finally {
+   855→        _syncInProgress = false
+   856→      }
+   857→    }, 3_000)
+   858→
+   859→    // ── Immediate DB refresh (not gated on WebSocket subscription) ──
+   860→    // Fetch the latest party state right away so members see content
+   861→    // and status changes that happened before they subscribed.
+   862→    // This runs even if the WebSocket never connects.
+   863→    fetchPartyFromDb(partyId).then((freshParty) => {
+   864→      if (!freshParty) return
+   865→      const currentStore = useWatchPartyStore.getState()
+   866→      if (!currentStore.currentParty) return
+   867→
+   868→      const needsContentUpdate = freshParty.contentId &&
+   869→        (freshParty.contentId !== currentStore.currentParty.contentId ||
+   870→          freshParty.contentTitle !== currentStore.currentParty.contentTitle)
+   871→      const needsStatusUpdate = freshParty.status !== currentStore.currentParty.status
+   872→      const needsPlaybackUpdate = freshParty.playbackState.isPlaying !== currentStore.currentParty.playbackState.isPlaying
+   873→
+   874→      if (needsContentUpdate) {
+   875→        currentStore.setPartyContent({
+   876→          contentId: freshParty.contentId!,
+   877→          mediaType: freshParty.mediaType!,
+   878→          season: freshParty.season,
+   879→          episode: freshParty.episode,
+   880→          contentTitle: freshParty.contentTitle!,
+   881→          contentPoster: freshParty.contentPoster,
+   882→        })
+   883→        if (freshParty.playbackState.isPlaying) {
+   884→          useWatchPartyStore.getState().setPlaybackState({ isPlaying: true, currentTime: freshParty.playbackState.currentTime })
+   885→        }
+   886→      }
+   887→      if (needsStatusUpdate) {
+   888→        currentStore.setPartyStatus(freshParty.status)
+   889→      }
+   890→      if (needsPlaybackUpdate && !needsContentUpdate) {
+   891→        currentStore.setPlaybackState({
+   892→          isPlaying: freshParty.playbackState.isPlaying,
+   893→          currentTime: freshParty.playbackState.currentTime,
+   894→          pausedBy: freshParty.playbackState.pausedBy,
+   895→        })
+   896→      }
+   897→    }).catch(() => { /* non-critical */ })
+   898→
+   899→    // ── Eagerly create voice manager BEFORE subscription ─────
+   900→    // Previously the voice manager was only created inside the
+   901→    // subscribe() callback when status === 'SUBSCRIBED'. If the
+   902→    // Supabase Realtime WebSocket is stuck in CONNECTING (which
+   903→    // happens when it falls back to REST for sends), the callback
+   904→    // never fires and _voiceManager stays null forever — causing
+   905→    // "Voice manager not available" on every PTT press.
+   906→    // Creating it eagerly ensures it's available immediately.
+   907→    //
+   908→    // On iOS, we do NOT create a WebRTC voice manager — iOS uses
+   909→    // voice clip recording instead. PeerConnections on iOS keep
+   910→    // AVAudioSession in .playAndRecord mode, permanently ducking
+   911→    // movie audio even after track.stop().
+   912→    if (!isIOSDevice() && !_voiceManager) {
+   913→      _voiceManager = new WebRtcVoiceManager(userId)
+   914→      console.log('[WatchParty] WebRTC voice manager created eagerly for user', userId)
+   915→
+   916→      // Wire signal sender to Supabase broadcast (captures _partyChannel by reference)
+   917→      _voiceManager.setSignalSender((targetUserId, signal) => {
+   918→        if (!_partyChannel) return
+   919→        let payload: WpWebrtcEvent
+   920→        switch (signal.type) {
+   921→          case 'offer':
+   922→            payload = { t: 'webrtc-offer', targetUserId, fromUserId: userId, sdp: signal.sdp! }
+   923→            break
+   924→          case 'answer':
+   925→            payload = { t: 'webrtc-answer', targetUserId, fromUserId: userId, sdp: signal.sdp! }
+   926→            break
+   927→          case 'ice-candidate':
+   928→            payload = { t: 'webrtc-ice', targetUserId, fromUserId: userId, candidate: signal.candidate! }
+   929→            break
+   930→        }
+   931→        wpBroadcast(_partyChannel, payload, `webrtc-${payload.t}`)
+   932→      })
+   933→
+   934→      // Auto-play remote audio (manager handles HTMLAudioElement internally)
+   935→      _voiceManager.setOnRemoteStream((remoteUserId, _stream) => {
+   936→        console.log('[WatchParty] Remote stream received from', remoteUserId)
+   937→        _voiceManager?.retryPausedAudio()
+   938→      })
+   939→
+   940→      _voiceManager.setOnRemoteStreamRemoved((remoteUserId) => {
+   941→        useWatchPartyStore.getState().setMemberTalking(remoteUserId, false)
+   942→      })
+   943→
+   944→      // Mic init is DEFERRED to first PTT press (sendPttStart) to avoid
+   945→      // altering the OS audio session before the iframe video player loads.
+   946→      // On iOS/Android, getUserMedia switches AVAudioSession from Playback
+   947→      // to PlayAndRecord which suppresses iframe audio output entirely.
+   948→      // On desktop, it may lower output volume to prevent acoustic feedback.
+   949→      // The voice manager OBJECT is still created eagerly here so that
+   950→      // incoming WebRTC signals can be handled immediately.
+   951→    }
+   952→
+   953→    // ── Postgres Changes listener (reliable real-time DB sync) ──────
+   954→    // Supabase Broadcast is fire-and-forget — if the member's WebSocket
+   955→    // isn't connected when the host picks content, the broadcast is lost.
+   956→    // The content-heal interval (3s) is the safety net but too slow.
+   957→    // Postgres Changes are triggered by actual DB writes (from the API),
+   958→    // not client-side broadcasts, making them significantly more reliable.
+   959→    // When the host's pickContent API call updates the DB, this listener
+   960→    // fires and the member receives it near-instantly.
+   961→    _partyChannel.on('postgres_changes',
+   962→      {
+   963→        event: 'UPDATE',
+   964→        schema: 'public',
+   965→        table: 'watch_parties',
+   966→        filter: `id=eq.${partyId}`,
+   967→      },
+   968→      (payload: { new: Record<string, unknown>; old: Record<string, unknown> }) => {
+   969→        const newRow = payload.new
+   970→
+   971→        // ── Content change ──────────────────────────────────
+   972→        // Use FRESH store state for comparison (broadcast may have
+   973→        // arrived between the Postgres Change event and this handler).
+   974→        const freshStore = useWatchPartyStore.getState()
+   975→        if (!freshStore.currentParty) return
+   976→        const dbContentId = newRow.content_id as string | null
+   977→        if (dbContentId && dbContentId !== freshStore.currentParty.contentId) {
+   978→          console.log('[WatchParty] Postgres Change: content updated —', dbContentId)
+   979→          freshStore.setPartyContent({
+   980→            contentId: dbContentId,
+   981→            mediaType: (newRow.media_type as 'movie' | 'tv') ?? 'movie',
+   982→            season: (newRow.season as number) ?? null,
+   983→            episode: (newRow.episode as number) ?? null,
+   984→            contentTitle: (newRow.content_title as string) || '',
+   985→            contentPoster: (newRow.content_poster as string) ?? null,
+   986→          })
+   987→          // Show toast only if the broadcast handler didn't already show
+   988→          // one recently (dedup within CONTENT_PICK_TOAST_DEDUP_MS).
+   989→          const now = Date.now()
+   990→          const contentTitle = (newRow.content_title as string) || ''
+   991→          if (now - _lastContentPickToastAt > CONTENT_PICK_TOAST_DEDUP_MS && contentTitle) {
+   992→            _lastContentPickToastAt = now
+   993→            toast.success(`Now watching: ${contentTitle}`)
+   994→          }
+   995→        }
+   996→
+   997→        // ── Status change (waiting → playing → ended) ───────
+   998→        // Re-fetch store in case setPartyContent above mutated it
+   999→        const statusStore = useWatchPartyStore.getState()
+  1000→        if (!statusStore.currentParty) return
+  1001→        const dbStatus = newRow.status as 'waiting' | 'playing' | 'ended'
+  1002→        if (dbStatus && dbStatus !== statusStore.currentParty.status) {
+  1003→          console.log('[WatchParty] Postgres Change: status changed from', statusStore.currentParty.status, 'to', dbStatus)
+  1004→          statusStore.setPartyStatus(dbStatus)
+  1005→          if (dbStatus === 'playing') {
+  1006→            const dbPlaybackTime = (newRow.playback_time as number) || 0
+  1007→            useWatchPartyStore.getState().setPlaybackState({ isPlaying: true, currentTime: dbPlaybackTime })
+  1008→            useWatchPartyStore.getState().setPartyStartTime(dbPlaybackTime)
+  1009→          }
+  1010→          if (dbStatus === 'ended') {
+  1011→            toast.info('Watch party has ended')
+  1012→            useWatchPartyStore.getState().leaveParty()
+  1013→            unsubscribePartyChannel()
+  1014→          }
+  1015→        }
+  1016→
+  1017→        // ── is_playing / playback_time sync ──────────────────
+  1018→        const playStore = useWatchPartyStore.getState()
+  1019→        if (!playStore.currentParty) return
+  1020→        const dbIsPlaying = newRow.is_playing as boolean
+  1021→        const dbPlaybackTime = (newRow.playback_time as number) || 0
+  1022→        if (typeof dbIsPlaying === 'boolean' && dbIsPlaying !== playStore.currentParty.playbackState.isPlaying) {
+  1023→          console.log('[WatchParty] Postgres Change: isPlaying changed from', playStore.currentParty.playbackState.isPlaying, 'to', dbIsPlaying)
+  1024→          playStore.setPlaybackState({ isPlaying: dbIsPlaying, currentTime: dbPlaybackTime })
+  1025→        }
+  1026→      },
+  1027→    )
+  1028→
+  1029→    // ── Broadcast events ────────────────────────────────────
+  1030→    _partyChannel.on('broadcast', { event: 'wp' }, (payload: { payload: WpBroadcastEvent }) => {
+  1031→      const event = payload.payload
+  1032→      const store = useWatchPartyStore.getState()
+  1033→
+  1034→      switch (event.t) {
+  1035→        case 'member-joined':
+  1036→          if (store.currentParty) {
+  1037→            const existing = store.currentParty.members.find((m) => m.userId === event.member.userId)
+  1038→            if (existing) {
+  1039→              // Update existing member's status from 'invited' → 'joined'
+  1040→              store.setMembers(
+  1041→                store.currentParty.members.map((m) =>
+  1042→                  m.userId === event.member.userId ? { ...m, ...event.member, memberStatus: event.member.memberStatus || 'joined' } : m
+  1043→                )
+  1044→              )
+  1045→              console.log(`[WatchParty] Member ${event.member.displayName} status updated to '${event.member.memberStatus || 'joined'}'`)
+  1046→            } else {
+  1047→              store.setMembers([...store.currentParty.members, event.member])
+  1048→              console.log(`[WatchParty] New member ${event.member.displayName} added with status '${event.member.memberStatus || 'joined'}'`)
+  1049→            }
+  1050→            toast.success(`${event.member.displayName} joined the watch party`)
+  1051→
+  1052→            // NOTE: We intentionally do NOT refresh members from DB here.
+  1053→            // The broadcast carries the authoritative member status ('joined').
+  1054→            // A DB refresh at this point races with the accept API write
+  1055→            // and can overwrite the correct 'joined' status with stale 'invited'
+  1056→            // data from a read that occurred before the DB transaction committed.
+  1057→            // The 30-second periodic sync handles any missed updates.
+  1058→
+  1059→            // Re-broadcast current content to the new member.
+  1060→            // If the host picked content before the member subscribed,
+  1061→            // the member missed the content-picked broadcast and their
+  1062→            // panel would stay on "Waiting for host to pick content...".
+  1063→            // The content-picked handler on the member side only shows
+  1064→            // a toast if the content actually changed, so existing
+  1065→            // members won't see duplicate toasts.
+  1066→            if (event.member.userId !== userId && store.currentParty.contentId && _partyChannel) {
+  1067→              wpBroadcast(_partyChannel, {
+  1068→                  t: 'content-picked',
+  1069→                  contentId: store.currentParty.contentId,
+  1070→                  mediaType: store.currentParty.mediaType!,
+  1071→                  season: store.currentParty.season,
+  1072→                  episode: store.currentParty.episode,
+  1073→                  contentTitle: store.currentParty.contentTitle!,
+  1074→                  contentPoster: store.currentParty.contentPoster,
+  1075→                } as WpContentPickedEvent, 'content-rebroadcast')
+  1076→              console.log(`[WatchParty] Re-broadcast content-picked to new member ${event.member.displayName}`)
+  1077→            }
+  1078→
+  1079→            // Also re-broadcast current playback state (playing/paused) so the
+  1080→            // new member knows whether the content is currently playing.
+  1081→            if (event.member.userId !== userId && _partyChannel && store.currentParty.status === 'playing') {
+  1082→              const ps = store.currentParty.playbackState
+  1083→              if (ps.isPlaying) {
+  1084→                wpBroadcast(_partyChannel, {
+  1085→                    t: 'played',
+  1086→                    currentTime: ps.currentTime,
+  1087→                    resumedBy: store.currentParty.hostId,
+  1088→                    resumedByName: 'Host',
+  1089→                  } as WpPlayedEvent, 'played-rebroadcast')
+  1090→              }
+  1091→            }
+  1092→
+  1093→            // Create WebRTC voice offer for the new member
+  1094→            // (existing members initiate connections to the joiner)
+  1095→            // Deferred until voice is initialized (first PTT press) to
+  1096→            // prevent RTCPeerConnection from switching AVAudioSession on
+  1097→            // iOS/Android WebView, which suppresses iframe video audio.
+  1098→            if (event.member.userId !== userId && _voiceReady) {
+  1099→              _voiceManager?.createOffer(event.member.userId).catch((err) => {
+  1100→                console.warn('[WatchParty] WebRTC offer creation failed for', event.member.displayName, err)
+  1101→              })
+  1102→            }
+  1103→          }
+  1104→          break
+  1105→
+  1106→        case 'member-left':
+  1107→          // SECURITY: Only accept member-left for the sender themselves, or from the host.
+  1108→          // Prevents a member from forging a "member-left" to kick another user.
+  1109→          if (store.currentParty && event.userId !== event.leftBy &&
+  1110→              event.leftBy !== store.currentParty.hostId) {
+  1111→            console.warn('[WatchParty] Rejected forged "member-left" broadcast — sender', event.leftBy, 'tried to remove', event.userId)
+  1112→            break
+  1113→          }
+  1114→          if (store.currentParty) {
+  1115→            store.setMembers(store.currentParty.members.filter((m) => m.userId !== event.userId))
+  1116→            toast.info(`${event.displayName} left the watch party`)
+  1117→            // Clean up WebRTC peer connection for the departing member
+  1118→            _voiceManager?.removePeer(event.userId)
+  1119→          }
+  1120→          break
+  1121→
+  1122→        case 'content-picked':
+  1123→          // Only show toast if content actually changed (prevents duplicate
+  1124→          // toasts when host re-broadcasts content for a new member)
+  1125→          const isContentChange = store.currentParty?.contentId !== event.contentId
+  1126→          // Preserve the playing state if the party is already playing.
+  1127→          // When the host changes content mid-party, the content-picked
+  1128→          // broadcast should NOT reset isPlaying — the party is still active.
+  1129→          const wasPlaying = store.currentParty?.playbackState.isPlaying ?? false
+  1130→          const wasStatus = store.currentParty?.status ?? 'waiting'
+  1131→          store.setPartyContent({
+  1132→            contentId: event.contentId,
+  1133→            mediaType: event.mediaType,
+  1134→            season: event.season,
+  1135→            episode: event.episode,
+  1136→            contentTitle: event.contentTitle,
+  1137→            contentPoster: event.contentPoster,
+  1138→          })
+  1139→          // setPartyContent resets playbackState when contentId changes.
+  1140→          // Re-apply playing state if the party was active — use current
+  1141→          // status from the store (not the snapshot) because party-started
+  1142→          // may have set status='playing' just before this handler runs.
+  1143→          if (isContentChange) {
+  1144→            const currentState = useWatchPartyStore.getState()
+  1145→            if (currentState.currentParty?.status === 'playing') {
+  1146→              currentState.setPlaybackState({ isPlaying: true, currentTime: 0, pausedBy: null })
+  1147→              currentState.setPartyStartTime(0)
+  1148→            }
+  1149→          }
+  1150→          if (isContentChange) {
+  1151→            _lastContentPickToastAt = Date.now()
+  1152→            toast.success(`Now watching: ${event.contentTitle}`)
+  1153→          }
+  1154→          break
+  1155→
+  1156→        case 'party-started':
+  1157→          store.setPartyStatus('playing')
+  1158→          store.setPlaybackState({ isPlaying: true, currentTime: event.currentTime, pausedBy: null })
+  1159→          store.setPartyStartTime(event.currentTime)
+  1160→          console.log('[WatchParty] Party started at time', event.currentTime)
+  1161→          // Always apply content from the broadcast — even if we already
+  1162→          // have content (it may be stale from a previous pick, or the
+  1163→          // host changed content before starting). This guarantees
+  1164→          // members always see the correct content.
+  1165→          if (event.contentId) {
+  1166→            const contentChanged = store.currentParty?.contentId !== event.contentId
+  1167→            store.setPartyContent({
+  1168→              contentId: event.contentId,
+  1169→              mediaType: event.mediaType ?? 'movie',
+  1170→              season: event.season ?? null,
+  1171→              episode: event.episode ?? null,
+  1172→              contentTitle: event.contentTitle ?? '',
+  1173→              contentPoster: event.contentPoster ?? null,
+  1174→            })
+  1175→            // setPartyContent resets playbackState when content changes,
+  1176→            // so re-apply playing state.
+  1177→            store.setPlaybackState({ isPlaying: true, currentTime: event.currentTime, pausedBy: null })
+  1178→            if (contentChanged) {
+  1179→              console.log('[WatchParty] Content updated from party-started broadcast:', event.contentTitle)
+  1180→            }
+  1181→          }
+  1182→          break
+  1183→
+  1184→        case 'paused':
+  1185→          // SECURITY: Verify sender is a known member of this party.
+  1186→          // Prevents forged pause broadcasts from non-members who
+  1187→          // discover the channel name.
+  1188→          if (store.currentParty && !store.currentParty.members.some((m) => m.userId === event.pausedBy)) {
+  1189→            console.warn('[WatchParty] Rejected forged "paused" broadcast from non-member:', event.pausedBy)
+  1190→            break
+  1191→          }
+  1192→          store.setPlaybackState({ isPlaying: false, pausedBy: event.pausedBy, currentTime: event.currentTime })
+  1193→          store.showPauseNotification({ pausedByName: event.pausedByName, currentTime: event.currentTime })
+  1194→          break
+  1195→
+  1196→        case 'played':
+  1197→          store.setPlaybackState({ isPlaying: true, pausedBy: null, currentTime: event.currentTime })
+  1198→          store.clearPauseNotification()
+  1199→          break
+  1200→
+  1201→        case 'seeked':
+  1202→          store.setPlaybackState({ currentTime: event.currentTime })
+  1203→          break
+  1204→
+  1205→        case 'sync':
+  1206→          // Host periodic sync — members use this to correct drift
+  1207→          store.setPlaybackState({
+  1208→            currentTime: event.currentTime,
+  1209→            isPlaying: event.isPlaying,
+  1210→          })
+  1211→          if (event.sentAt) _lastSyncSentAt = event.sentAt
+  1212→          break
+  1213→
+  1214→        case 'ptt-start':
+  1215→          if (event.userId && event.userId !== userId) {
+  1216→            // Remove from stopped set — they're talking again, so presence
+  1217→            // sync data for this user is now authoritative
+  1218→            _pttStoppedUsers.delete(event.userId)
+  1219→            store.setMemberTalking(event.userId, true)
+  1220→            console.log('[WatchParty] PTT start from', event.displayName)
+  1221→            // Retry any paused remote audio elements when a remote
+  1222→            // user starts talking. The browser autoplay policy blocks
+  1223→            // audio.play() without a user gesture, but the PTT button
+  1224→            // press on the remote side means audio should start flowing.
+  1225→            // We retry here as a best-effort — if still blocked, the
+  1226→            // next local PTT press (a real user gesture) will unlock it.
+  1227→            _voiceManager?.retryPausedAudio()
+  1228→            // Safety timeout: auto-clear the talking indicator if no ptt-stop
+  1229→            // is received within TALKING_TIMEOUT_MS. This prevents the indicator
+  1230→            // from getting permanently stuck when ptt-stop broadcasts are lost
+  1231→            // (Supabase Broadcast is fire-and-forget, not guaranteed delivery).
+  1232→            clearTalkingTimeout(event.userId)
+  1233→            _talkingTimeouts.set(event.userId, setTimeout(() => {
+  1234→              console.warn('[WatchParty] Talking timeout for', event.userId, '— auto-clearing stuck indicator')
+  1235→              store.setMemberTalking(event.userId, false)
+  1236→              _pttStoppedUsers.add(event.userId)
+  1237→              _talkingTimeouts.delete(event.userId)
+  1238→            }, TALKING_TIMEOUT_MS))
+  1239→          }
+  1240→          break
+  1241→
+  1242→        case 'ptt-stop':
+  1243→          if (event.userId) {
+  1244→            store.setMemberTalking(event.userId, false)
+  1245→            // Mark this user as having explicitly stopped PTT.
+  1246→            // Presence sync data for this user is now stale (may still
+  1247→            // show isTalking: true) and must NOT re-activate the
+  1248→            // talking indicator. Only a new ptt-start broadcast clears
+  1249→            // this flag. This prevents the "stuck speaking" bug caused
+  1250→            // by presence sync lagging behind the ptt-stop broadcast.
+  1251→            _pttStoppedUsers.add(event.userId)
+  1252→            // Clear the safety timeout since we received an explicit ptt-stop
+  1253→            clearTalkingTimeout(event.userId)
+  1254→            console.log('[WatchParty] PTT stop from', event.userId)
+  1255→          }
+  1256→          break
+  1257→
+  1258→        case 'profile-updated':
+  1259→          // A party member changed their display name or avatar.
+  1260→          // Update the member entry in the current party so the UI
+  1261→          // reflects the change instantly in the members list.
+  1262→          if (store.currentParty) {
+  1263→            store.updateMemberProfile(event.userId, {
+  1264→              displayName: event.displayName,
+  1265→              avatarUrl: event.avatarUrl,
+  1266→            })
+  1267→          }
+  1268→          break
+  1269→
+  1270→        case 'ended':
+  1271→          // SECURITY: Verify the sender is the host. Any party member could
+  1272→          // forge an 'ended' broadcast. Cross-check with the known host ID.
+  1273→          if (event.endedBy && store.currentParty && event.endedBy !== store.currentParty.hostId) {
+  1274→            console.warn('[WatchParty] Rejected forged "ended" broadcast from non-host:', event.endedBy)
+  1275→            break
+  1276→          }
+  1277→          console.log('[WatchParty] Party ended by', event.endedBy)
+  1278→          toast.info('Watch party has ended')
+  1279→          // Clean up: leave party, unsubscribe channel, close panel
+  1280→          store.leaveParty()
+  1281→          unsubscribePartyChannel()
+  1282→          break
+  1283→
+  1284→        // ── WebRTC voice signaling (non-iOS only) ────────────
+  1285→        // On iOS, voice uses clip recording instead of WebRTC.
+  1286→        // PeerConnections are never created on iOS, so we skip
+  1287→        // all WebRTC signaling to avoid triggering AVAudioSession changes.
+  1288→        case 'webrtc-offer':
+  1289→          if (!isIOSDevice() && event.targetUserId === userId && _voiceReady) {
+  1290→            _voiceManager?.handleOffer(event.fromUserId, event.sdp)
+  1291→          }
+  1292→          break
+  1293→
+  1294→        case 'webrtc-answer':
+  1295→          if (!isIOSDevice() && event.targetUserId === userId && _voiceReady) {
+  1296→            _voiceManager?.handleAnswer(event.fromUserId, event.sdp)
+  1297→          }
+  1298→          break
+  1299→
+  1300→        case 'webrtc-ice':
+  1301→          if (!isIOSDevice() && event.targetUserId === userId && _voiceReady) {
+  1302→            _voiceManager?.handleIceCandidate(event.fromUserId, event.candidate)
+  1303→          }
+  1304→          break
+  1305→
+  1306→        // ── Voice clip (iOS sends, all platforms receive) ──
+  1307→        case 'voice-clip': {
+  1308→          const clipEvent = event as unknown as WpVoiceClipEvent
+  1309→          if (clipEvent.fromUserId && clipEvent.fromUserId !== userId) {
+  1310→            // Show speaking indicator for the duration of the clip
+  1311→            store.setMemberTalking(clipEvent.fromUserId, true)
+  1312→            playVoiceClip(
+  1313→              clipEvent.fromUserId,
+  1314→              clipEvent.audio,
+  1315→              clipEvent.mimeType,
+  1316→              () => {
+  1317→                // Clear speaking indicator when clip finishes playing
+  1318→                store.setMemberTalking(clipEvent.fromUserId, false)
+  1319→              },
+  1320→            )
+  1321→          }
+  1322→          break
+  1323→        }
+  1324→      }
+  1325→    })
+  1326→
+  1327→    // ── Presence events ─────────────────────────────────────
+  1328→    _partyChannel.on('presence', { event: 'sync' }, () => {
+  1329→      if (!_partyChannel) return
+  1330→      const store = useWatchPartyStore.getState()
+  1331→      const newState = _partyChannel.presenceState()
+  1332→
+  1333→      // Build talking map from presence, but EXCLUDE the local user.
+  1334→      // The local user's talking state is managed by isPttActive,
+  1335→      // not talkingMembers. Including it here causes the wrong
+  1336→      // member to show as speaking when the local user presses PTT.
+  1337→      const talkingMap = new Map<string, boolean>()
+  1338→      Object.values(newState).forEach((presences) => {
+  1339→        presences.forEach((p) => {
+  1340→          const pData = p as unknown as { userId: string; isTalking: boolean }
+  1341→          if (pData.isTalking && pData.userId !== userId) {
+  1342→            talkingMap.set(pData.userId, true)
+  1343→          }
+  1344→        })
+  1345→      })
+  1346→
+  1347→      const currentTalking = store.talkingMembers
+  1348→      talkingMap.forEach((_, uid) => {
+  1349→        // Skip if this user explicitly stopped PTT — the presence data
+  1350→        // is stale (isTalking: true) but the ptt-stop broadcast already
+  1351→        // cleared the indicator. Only a new ptt-start broadcast can
+  1352→        // re-activate the talking indicator for this user.
+  1353→        if (_pttStoppedUsers.has(uid)) return
+  1354→        if (!currentTalking.has(uid)) store.setMemberTalking(uid, true)
+  1355→      })
+  1356→      currentTalking.forEach((_, uid) => {
+  1357→        if (!talkingMap.has(uid) && uid !== userId) store.setMemberTalking(uid, false)
+  1358→      })
+  1359→    })
+  1360→
+  1361→    _partyChannel.on('presence', { event: 'leave' }, (payload: { leftPresences: { userId: string }[] }) => {
+  1362→      const store = useWatchPartyStore.getState()
+  1363→      const myUserId = useAuthStore.getState().user?.id
+  1364→
+  1365→      payload.leftPresences.forEach((p) => {
+  1366→        store.setMemberTalking(p.userId, false)
+  1367→        _pttStoppedUsers.delete(p.userId)
+  1368→
+  1369→        if (store.currentParty?.playbackState.pausedBy === p.userId) {
+  1370→          store.setPlaybackState({ pausedBy: null })
+  1371→          store.clearPauseNotification()
+  1372→          toast.info('Pause released: pauser left')
+  1373→        }
+  1374→
+  1375→        // If the HOST left presence, start a 30-second timer.
+  1376→        // If the host doesn't rejoin within 30s, the party auto-ends.
+  1377→        // This handles: host closed app, killed process, lost connection
+  1378→        // for extended period. It does NOT fire on brief network blips
+  1379→        // because the host's presence will rejoin within a few seconds.
+  1380→        if (
+  1381→          p.userId !== myUserId &&
+  1382→          store.currentParty?.hostId === p.userId &&
+  1383→          !store.isHost
+  1384→        ) {
+  1385→          if (_hostLeftTimer) clearTimeout(_hostLeftTimer)
+  1386→          _hostLeftAt = Date.now()
+  1387→          _hostLeftTimer = setTimeout(() => {
+  1388→            // Host still absent after 30s — auto-end for members
+  1389→            const current = useWatchPartyStore.getState()
+  1390→            if (!current.currentParty || !current.isInParty) return
+  1391→            // Double-check: host presence might have rejoined
+  1392→            const presence = _partyChannel?.presenceState()
+  1393→            const hostPresent = presence && Object.values(presence).some((presences) =>
+  1394→              presences.some((pr) => (pr as unknown as { userId: string }).userId === p.userId)
+  1395→            )
+  1396→            if (hostPresent) {
+  1397→              _hostLeftAt = null
+  1398→              return
+  1399→            }
+  1400→            console.log('[WatchParty] Host absent for too long — auto-ending party for members')
+  1401→            toast.info('Host disconnected — watch party ended')
+  1402→            current.leaveParty()
+  1403→            unsubscribePartyChannel()
+  1404→            _hostLeftAt = null
+  1405→          }, HOST_ABSENCE_TIMEOUT_MS)
+  1406→        }
+  1407→
+  1408→        // If a MEMBER left presence and we're the host, start a timer
+  1409→        // to remove them from the party after 30 seconds of absence.
+  1410→        // This handles: member closed app, killed process, lost connection.
+  1411→        // Presence already has ~30s built-in tolerance from Supabase heartbeat,
+  1412→        // so by the time this event fires, the member has been gone ~60s total.
+  1413→        if (
+  1414→          p.userId !== myUserId &&
+  1415→          store.isHost &&
+  1416→          store.currentParty?.hostId === myUserId &&
+  1417→          p.userId !== store.currentParty?.hostId
+  1418→        ) {
+  1419→          // Cancel any existing timer for this member
+  1420→          const existingTimer = _memberLeftTimers.get(p.userId)
+  1421→          if (existingTimer) clearTimeout(existingTimer)
+  1422→
+  1423→          const absentUserId = p.userId
+  1424→          _memberLeftTimers.set(absentUserId, setTimeout(async () => {
+  1425→            const current = useWatchPartyStore.getState()
+  1426→            if (!current.currentParty || !current.isInParty || !current.isHost) return
+  1427→            // Double-check: member presence might have rejoined
+  1428→            const presence = _partyChannel?.presenceState()
+  1429→            const memberPresent = presence && Object.values(presence).some((presences) =>
+  1430→              presences.some((pr) => (pr as unknown as { userId: string }).userId === absentUserId)
+  1431→            )
+  1432→            if (memberPresent) {
+  1433→              _memberLeftTimers.delete(absentUserId)
+  1434→              return
+  1435→            }
+  1436→            // Member absent for too long after presence leave — remove from party
+  1437→            console.log('[WatchParty] Member', absentUserId, 'absent for too long — removing from party')
+  1438→            const partyId = _currentPartyId
+  1439→            // Remove from local member list
+  1440→            current.setMembers(current.currentParty.members.filter((m) => m.userId !== absentUserId))
+  1441→            // Clean up WebRTC peer connection
+  1442→            _voiceManager?.removePeer(absentUserId)
+  1443→            // Notify other members via broadcast
+  1444→            const absentMember = current.currentParty.members.find((m) => m.userId === absentUserId)
+  1445→            if (absentMember && _partyChannel) {
+  1446→              wpBroadcast(_partyChannel, {
+  1447→                t: 'member-left',
+  1448→                userId: absentUserId,
+  1449→                displayName: absentMember.displayName,
+  1450→                leftBy: useAuthStore.getState().user?.id ?? absentUserId, // host is removing the member
+  1451→              } as WpMemberLeftEvent, 'member-absence-removal')
+  1452→            }
+  1453→            // Update DB: set member status to 'left'
+  1454→            if (partyId) {
+  1455→              wpApi('remove-member', { partyId, targetUserId: absentUserId }).catch(() => { /* non-critical */ })
+  1456→            }
+  1457→            toast.info('A member disconnected from the watch party')
+  1458→            _memberLeftTimers.delete(absentUserId)
+  1459→          }, MEMBER_ABSENCE_TIMEOUT_MS))
+  1460→        }
+  1461→      })
+  1462→    })
+  1463→
+  1464→    // ── Presence rejoin: cancel absence timers ──
+  1465→    _partyChannel.on('presence', { event: 'join' }, (payload: { newPresences: { userId: string }[] }) => {
+  1466→      payload.newPresences.forEach((p) => {
+  1467→        const pData = p as unknown as { userId: string }
+  1468→        const store = useWatchPartyStore.getState()
+  1469→
+  1470→        // Cancel host absence timer if host rejoined
+  1471→        if (store.currentParty?.hostId === pData.userId && !store.isHost) {
+  1472→          if (_hostLeftTimer) {
+  1473→            clearTimeout(_hostLeftTimer)
+  1474→            _hostLeftTimer = null
+  1475→            _hostLeftAt = null
+  1476→          }
+  1477→        }
+  1478→
+  1479→        // Cancel member absence timer if member rejoined
+  1480→        const memberTimer = _memberLeftTimers.get(pData.userId)
+  1481→        if (memberTimer) {
+  1482→          clearTimeout(memberTimer)
+  1483→          _memberLeftTimers.delete(pData.userId)
+  1484→        }
+  1485→      })
+  1486→    })
+  1487→
+  1488→    // ── Subscribe and track presence ────────────────────────
+  1489→    _partyChannel.subscribe(async (status) => {
+  1490→      if (status === 'SUBSCRIBED') {
+  1491→        console.log('[WatchParty] Party channel subscribed successfully')
+  1492→        _restFallbackCount = 0
+  1493→        try {
+  1494→          await _partyChannel!.track({
+  1495→            userId,
+  1496→            displayName,
+  1497→            avatarUrl,
+  1498→            isTalking: false,
+  1499→          })
+  1500→        } catch (trackErr) {
+  1501→          console.error('[WatchParty] Failed to track presence:', trackErr)
+  1502→          // Non-fatal: the party channel is still usable for broadcasts,
+  1503→          // but presence-based features (talking indicators, member detection)
+  1504→          // may not work. The 30s periodic sync provides a fallback.
+  1505→        }
+  1506→        useWatchPartyStore.getState().setConnected(true)
+  1507→
+  1508→        // ── Refresh party state from DB after subscription ──────
+  1509→        // Broadcasts sent before this client subscribed are lost
+  1510→        // (Supabase Broadcast is fire-and-forget, not persisted).
+  1511→        // Fetching the latest DB state ensures we don't miss
+  1512→        // content-picked or party-started events.
+  1513→        try {
+  1514→          const freshParty = await fetchPartyFromDb(partyId)
+  1515→          if (freshParty) {
+  1516→            const currentStore = useWatchPartyStore.getState()
+  1517→            if (currentStore.currentParty) {
+  1518→              // Update fields that may have changed from broadcasts we missed.
+  1519→              // Detect content changes (not just initial pick) — the host may
+  1520→              // have picked or changed content before this client subscribed.
+  1521→              const needsContentUpdate = freshParty.contentId &&
+  1522→                (freshParty.contentId !== currentStore.currentParty.contentId ||
+  1523→                  freshParty.contentTitle !== currentStore.currentParty.contentTitle)
+  1524→              const needsStatusUpdate = freshParty.status !== currentStore.currentParty.status
+  1525→              const needsPlaybackUpdate = freshParty.playbackState.isPlaying !== currentStore.currentParty.playbackState.isPlaying
+  1526→
+  1527→              if (needsContentUpdate) {
+  1528→                currentStore.setPartyContent({
+  1529→                  contentId: freshParty.contentId!,
+  1530→                  mediaType: freshParty.mediaType!,
+  1531→                  season: freshParty.season,
+  1532→                  episode: freshParty.episode,
+  1533→                  contentTitle: freshParty.contentTitle!,
+  1534→                  contentPoster: freshParty.contentPoster,
+  1535→                })
+  1536→                // setPartyContent resets playbackState, so re-apply if needed
+  1537→                if (freshParty.playbackState.isPlaying) {
+  1538→                  const updatedStore = useWatchPartyStore.getState()
+  1539→                  updatedStore.setPlaybackState({ isPlaying: true, currentTime: freshParty.playbackState.currentTime })
+  1540→                }
+  1541→              }
+  1542→              if (needsStatusUpdate) {
+  1543→                currentStore.setPartyStatus(freshParty.status)
+  1544→              }
+  1545→              if (needsPlaybackUpdate && !needsContentUpdate) {
+  1546→                currentStore.setPlaybackState({
+  1547→                  isPlaying: freshParty.playbackState.isPlaying,
+  1548→                  currentTime: freshParty.playbackState.currentTime,
+  1549→                  pausedBy: freshParty.playbackState.pausedBy,
+  1550→                })
+  1551→              }
+  1552→
+  1553→              // Sync member list from DB (new members, removed members).
+  1554→              // IMPORTANT: Never downgrade a member's status from 'joined' to
+  1555→              // 'invited'. The accept API sets status to 'joined' and returns
+  1556→              // the correct data, but this DB fetch can race with the write
+  1557→              // on PWA (Supabase read replicas) and return stale 'invited'.
+  1558→              // Only upgrade statuses (invited → joined) or keep them the same.
+  1559→              const freshMemberMap = new Map(freshParty.members.map((m) => [m.userId, m]))
+  1560→              const localMemberMap = new Map(currentStore.currentParty.members.map((m) => [m.userId, m]))
+  1561→
+  1562→              let needsMemberUpdate = false
+  1563→              const mergedMembers: typeof freshParty.members = []
+  1564→
+  1565→              // Start with fresh members from DB
+  1566→              for (const fm of freshParty.members) {
+  1567→                const local = localMemberMap.get(fm.userId)
+  1568→                if (local) {
+  1569→                  // Member exists locally — prefer the higher status:
+  1570→                  // 'joined' > 'invited'. This prevents a stale DB read
+  1571→                  // from downgrading a member who already accepted.
+  1572→                  const status = (local.memberStatus === 'joined' && fm.memberStatus === 'invited')
+  1573→                    ? 'joined'
+  1574→                    : fm.memberStatus
+  1575→                  const merged = { ...fm, memberStatus: status }
+  1576→                  if (merged.memberStatus !== local.memberStatus) needsMemberUpdate = true
+  1577→                  mergedMembers.push(merged)
+  1578→                } else {
+  1579→                  // New member not in local state — add them
+  1580→                  mergedMembers.push(fm)
+  1581→                  needsMemberUpdate = true
+  1582→                }
+  1583→              }
+  1584→
+  1585→              // Check if any local members were removed from the party
+  1586→              if (mergedMembers.length !== currentStore.currentParty.members.length) {
+  1587→                needsMemberUpdate = true
+  1588→              }
+  1589→
+  1590→              if (needsMemberUpdate) {
+  1591→                currentStore.setMembers(mergedMembers)
+  1592→              }
+  1593→            }
+  1594→          }
+  1595→        } catch { /* non-critical — party state will update via future broadcasts */ }
+  1596→
+  1597→        // ── Periodic DB sync (safety net for missed broadcasts) ──
+  1598→        // Supabase Broadcast is fire-and-forget — messages can be lost
+  1599→        // if the WebSocket connection is flaky. This 30-second refresh
+  1600→        // catches: content-picked, party-started, member changes, etc.
+  1601→        if (_syncInterval) clearInterval(_syncInterval)
+  1602→        _syncInterval = setInterval(async () => {
+  1603→          if (!_currentPartyId || _syncInProgress) return
+  1604→          _syncInProgress = true
+  1605→          try {
+  1606→            const freshParty = await fetchPartyFromDb(_currentPartyId)
+  1607→            if (!freshParty) return
+  1608→            const store = useWatchPartyStore.getState()
+  1609→            if (!store.currentParty) return
+  1610→
+  1611→            // If the party was ended (host closed app, etc.), auto-leave.
+  1612→            // The 'ended' broadcast may not reach us (PWA WS dead, REST
+  1613→            // fallback cancelled by browser). The host's keepalive API
+  1614→            // call updates the DB, so this DB poll is the safety net.
+  1615→            if (freshParty.status === 'ended') {
+  1616→              toast.info('Watch party has ended')
+  1617→              store.leaveParty()
+  1618→              unsubscribePartyChannel()
+  1619→              return
+  1620→            }
+  1621→
+  1622→            // Sync content — update if DB has content that differs from
+  1623→            // local store (initial pick, missed broadcast, or content change).
+  1624→            // Previously only synced when local had NO content, which missed
+  1625→            // content changes and missed broadcasts after the member joined.
+  1626→            const contentDiffers = freshParty.contentId !== store.currentParty.contentId ||
+  1627→              (freshParty.contentId && freshParty.contentTitle !== store.currentParty.contentTitle)
+  1628→            if (freshParty.contentId && contentDiffers) {
+  1629→              store.setPartyContent({
+  1630→                contentId: freshParty.contentId,
+  1631→                mediaType: freshParty.mediaType!,
+  1632→                season: freshParty.season,
+  1633→                episode: freshParty.episode,
+  1634→                contentTitle: freshParty.contentTitle!,
+  1635→                contentPoster: freshParty.contentPoster,
+  1636→              })
+  1637→              if (freshParty.playbackState.isPlaying) {
+  1638→                useWatchPartyStore.getState().setPlaybackState({
+  1639→                  isPlaying: true,
+  1640→                  currentTime: freshParty.playbackState.currentTime,
+  1641→                })
+  1642→              }
+  1643→            }
+  1644→
+  1645→            // Sync status
+  1646→            if (freshParty.status !== store.currentParty.status) {
+  1647→              store.setPartyStatus(freshParty.status)
+  1648→            }
+  1649→
+  1650→            // Sync playback state
+  1651→            const fp = freshParty.playbackState
+  1652→            const cp = store.currentParty.playbackState
+  1653→            if (fp.isPlaying !== cp.isPlaying || Math.abs(fp.currentTime - cp.currentTime) > 5) {
+  1654→              store.setPlaybackState({
+  1655→                isPlaying: fp.isPlaying,
+  1656→                currentTime: fp.currentTime,
+  1657→                pausedBy: fp.pausedBy,
+  1658→              })
+  1659→            }
+  1660→
+  1661→            // Sync members — detect both additions/removals AND status changes
+  1662→            // (e.g., invited → joined). Never downgrade from 'joined' to 'invited'.
+  1663→            const currentMemberIds = new Set(store.currentParty.members.map(m => m.userId))
+  1664→            const freshMemberIds = new Set(freshParty.members.map(m => m.userId))
+  1665→            const membersAddedOrRemoved = currentMemberIds.size !== freshMemberIds.size ||
+  1666→              [...currentMemberIds].some(id => !freshMemberIds.has(id))
+  1667→            const localMemberMap = new Map(store.currentParty.members.map(m => [m.userId, m]))
+  1668→            const memberStatusUpgraded = freshParty.members.some((fm) => {
+  1669→              const local = localMemberMap.get(fm.userId)
+  1670→              if (!local) return false
+  1671→              // Only count as changed if status UPGRADED (invited → joined),
+  1672→              // not downgraded (joined → invited from stale DB read)
+  1673→              if (local.memberStatus === 'joined' && fm.memberStatus === 'invited') return false
+  1674→              return local.memberStatus !== fm.memberStatus
+  1675→            })
+  1676→            if (membersAddedOrRemoved || memberStatusUpgraded) {
+  1677→              // Merge: keep higher status for existing members
+  1678→              const merged = freshParty.members.map((fm) => {
+  1679→                const local = localMemberMap.get(fm.userId)
+  1680→                if (local && local.memberStatus === 'joined' && fm.memberStatus === 'invited') {
+  1681→                  return { ...fm, memberStatus: 'joined' as const }
+  1682→                }
+  1683→                return fm
+  1684→              })
+  1685→              store.setMembers(merged)
+  1686→            }
+  1687→          } catch { /* non-critical */ } finally {
+  1688→            _syncInProgress = false
+  1689→          }
+  1690→        }, 30_000)
+  1691→
+  1692→        // ── Content-heal interval already started before subscribe() ──
+  1693→        // The content-heal interval (3s DB poll for content + status)
+  1694→        // was moved outside the subscribe callback to ensure it runs
+  1695→        // even when the WebSocket never connects. No need to create
+  1696→        // it again here — the existing interval continues running.
+  1697→
+  1698→        // ── Channel keepalive — detect and recover WebSocket drops ──
+  1699→        // Supabase Realtime WebSocket connections can silently die
+  1700→        // (no close event, heartbeat timeout). This 15-second check
+  1701→        // verifies the channel is still joined and forces a
+  1702→        // resubscribe if it dropped. This is critical because:
+  1703→        //   - REST fallback for sends works but has higher latency
+  1704→        //   - WebRTC signaling over REST causes ICE negotiation failures
+  1705→        //   - PTT broadcasts via REST may not reach receivers whose
+  1706→        //     WebSocket is also down (REST delivery requires receiver WS)
+  1707→        if (_keepaliveInterval) clearInterval(_keepaliveInterval)
+  1708→        _keepaliveInterval = setInterval(() => {
+  1709→          if (!_partyChannel) return
+  1710→          const state = _partyChannel.state
+  1711→          // FIX: Check for 'joined' (Supabase's subscribed state), not 'subscribed'
+  1712→          // Skip recreation if a sync is already in progress to avoid
+  1713→          // piling up Supabase REST requests (causes ERR_INSUFFICIENT_RESOURCES)
+  1714→          if (state !== 'joined' && !_syncInProgress) {
+  1715→            console.warn('[WatchParty] Keepalive: party channel not joined (state:', state, ') — recreating')
+  1716→            recreatePartyChannel()
+  1717→          }
+  1718→        }, 30_000)
+  1719→
+  1720→        // ── Ensure voice manager is initialized and renegotiate ──
+  1721→        // The voice manager is now created eagerly above, but the mic
+  1722→        // init() might still be in progress. If init() already completed
+  1723→        // successfully, trigger renegotiation so existing peers get our
+  1724→        // audio track. If init() is still pending, the PTT handler will
+  1725→        // handle it on first press.
+  1726→        if (_voiceManager && _voiceManager.getIsInitialized()) {
+  1727→          useWatchPartyStore.getState().setVoiceStatus('mic-granted')
+  1728→          // Renegotiate all existing peer connections now that we have an
+  1729→          // audio track and the channel is subscribed (signaling works).
+  1730→          const retryRenegotiate = (attempt: number) => {
+  1731→            if (attempt > 5 || !_voiceManager?.getIsInitialized()) return
+  1732→            const delay = attempt === 0 ? 500 : 1500 + attempt * 1000
+  1733→            setTimeout(() => {
+  1734→              if (!_voiceManager?.getIsInitialized()) return
+  1735→              _voiceManager.renegotiateAll().then(() => {
+  1736→                console.log('[WatchParty] Post-subscribe renegotiation complete (attempt', attempt + 1, ')')
+  1737→                useWatchPartyStore.getState().setVoiceStatus('connected')
+  1738→              }).catch((err) => {
+  1739→                console.warn('[WatchParty] Post-subscribe renegotiation failed (attempt', attempt + 1, '):', err)
+  1740→                retryRenegotiate(attempt + 1)
+  1741→              })
+  1742→            }, delay)
+  1743→          }
+  1744→          retryRenegotiate(0)
+  1745→        }
+  1746→
+  1747→        // ── Create WebRTC offers for all existing members ─────
+  1748→        // When joining, existing members will also create offers for us.
+  1749→        // We initiate offers too for redundancy — the voice manager deduplicates
+  1750→        // (createOffer returns early if a peer connection already exists).
+  1751→        //
+  1752→        // IMPORTANT: First clean up any dead peer connections (failed/disconnected)
+  1753→        // so that createOffer() doesn't skip them. This is critical when the
+  1754→        // WebSocket reconnects after a drop — the old peer connections are dead
+  1755→        // but still in the map, blocking new offers from being created.
+  1756→        if (_voiceManager) {
+  1757→          const failedPeers = _voiceManager.cleanupFailedPeers()
+  1758→          if (failedPeers.length > 0) {
+  1759→            console.log('[WatchParty] Cleaned up', failedPeers.length, 'dead peer connections — will recreate with fresh offers')
+  1760→            for (const uid of failedPeers) {
+  1761→              useWatchPartyStore.getState().setMemberTalking(uid, false)
+  1762→            }
+  1763→          }
+  1764→        }
+  1765→
+  1766→        const presenceState = _partyChannel!.presenceState()
+  1767→        const otherUserIds: string[] = []
+  1768→        Object.values(presenceState).forEach((presences) => {
+  1769→          presences.forEach((p) => {
+  1770→            const pData = p as unknown as { userId: string }
+  1771→            if (pData.userId && pData.userId !== userId) {
+  1772→              otherUserIds.push(pData.userId)
+  1773→            }
+  1774→          })
+  1775→        })
+  1776→        for (const uid of otherUserIds) {
+  1777→          if (_voiceReady) _voiceManager?.createOffer(uid).catch(() => { /* non-critical */ })
+  1778→        }
+  1779→
+  1780→        // ── Notify caller that subscription is ready ────────────
+  1781→        // Used by acceptInvite to broadcast member-joined AFTER the
+  1782→        // channel is fully subscribed, ensuring the host receives it.
+  1783→        onSubscribed?.()
+  1784→      } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSE') {
+  1785→        console.error('[WatchParty] Party channel disconnected:', status)
+  1786→        // Retry subscription with exponential backoff (max 5 attempts)
+  1787→        // Must recreate the channel since subscribe() can only be called once per instance
+  1788→        let retryAttempt = 0
+  1789→        const maxRetries = 5
+  1790→        const retrySubscribe = () => {
+  1791→          retryAttempt++
+  1792→          if (retryAttempt > maxRetries || !_currentPartyId) return
+  1793→          const delay = Math.min(3000 * retryAttempt, 15000)
+  1794→          console.log(`[WatchParty] Recreating party channel (attempt ${retryAttempt}/${maxRetries}) in ${delay}ms...`)
+  1795→          setTimeout(() => {
+  1796→            if (_currentPartyId && retryAttempt <= maxRetries) {
+  1797→              recreatePartyChannel()
+  1798→            }
+  1799→          }, delay)
+  1800→        }
+  1801→        retrySubscribe()
+  1802→      }
+  1803→    })
+  1804→  } catch {
+  1805→    _partyChannel = null
+  1806→    _currentPartyId = null
+  1807→  }
+  1808→}
+  1809→
+  1810→function unsubscribePartyChannel() {
+  1811→  _pttHeld = false
+  1812→  _pttStoppedUsers.clear()
+  1813→  _lastContentPickToastAt = 0
+  1814→
+  1815→  // Clear all talking safety timeouts
+  1816→  for (const [uid, timeout] of _talkingTimeouts) {
+  1817→    clearTimeout(timeout)
+  1818→  }
+  1819→  _talkingTimeouts.clear()
+  1820→
+  1821→  // Clear periodic sync interval
+  1822→  if (_syncInterval) {
+  1823→    clearInterval(_syncInterval)
+  1824→    _syncInterval = null
+  1825→  }
+  1826→
+  1827→  // Clear channel keepalive interval
+  1828→  if (_keepaliveInterval) {
+  1829→    clearInterval(_keepaliveInterval)
+  1830→    _keepaliveInterval = null
+  1831→  }
+  1832→
+  1833→  // Clear content self-heal interval
+  1834→  if (_contentHealInterval) {
+  1835→    clearInterval(_contentHealInterval)
+  1836→    _contentHealInterval = null
+  1837→  }
+  1838→
+  1839→  // Clear host absence timer
+  1840→  if (_hostLeftTimer) {
+  1841→    clearTimeout(_hostLeftTimer)
+  1842→    _hostLeftTimer = null
+  1843→    _hostLeftAt = null
+  1844→  }
+  1845→
+  1846→  // Clear all member absence timers
+  1847→  for (const [, timer] of _memberLeftTimers) {
+  1848→    clearTimeout(timer)
+  1849→  }
+  1850→  _memberLeftTimers.clear()
+  1851→
+  1852→  // Destroy voice manager before removing channel
+  1853→  if (_voiceManager) {
+  1854→    _voiceManager.destroy()
+  1855→    _voiceManager = null
+  1856→  }
+  1857→  _voiceReady = false
+  1858→
+  1859→  // Abort any in-progress voice clip recording
+  1860→  if (_clipRecorder) {
+  1861→    _clipRecorder.abort()
+  1862→    _clipRecorder = null
+  1863→  }
+  1864→  // Stop all playing voice clips
+  1865→  stopAllVoiceClips()
+  1866→  // Clean up shared AudioContext for iOS voice clip playback
+  1867→  cleanupAudioContext()
+  1868→  if (_partyChannel) {
+  1869→    try { supabase.removeChannel(_partyChannel) } catch { /* already removed */ }
+  1870→    _partyChannel = null
+  1871→  }
+  1872→  _currentPartyId = null
+  1873→}
+  1874→
+  1875→// ── Hook ───────────────────────────────────────────────────
+  1876→
+  1877→export function useWatchParty() {
+  1878→  const user = useAuthStore((s) => s.user)
+  1879→  const profile = useAuthStore((s) => s.profile)
+  1880→  const status = useAuthStore((s) => s.status)
+  1881→
+  1882→  const setCurrentParty = useWatchPartyStore((s) => s.setCurrentParty)
+  1883→  const removeInvitation = useWatchPartyStore((s) => s.removeInvitation)
+  1884→  const setConnected = useWatchPartyStore((s) => s.setConnected)
+  1885→  const leavePartyStore = useWatchPartyStore((s) => s.leaveParty)
+  1886→
+  1887→  // ── Mount guard: increment on mount, tear down on unmount ──
+  1888→  // Prevents stale async callbacks from a previous React mount
+  1889→  // (StrictMode double-effect, HMR) from mutating state.
+  1890→  useEffect(() => {
+  1891→    const myMountId = ++_mountId
+  1892→    return () => {
+  1893→      // On unmount, invalidate this mount's callbacks by incrementing.
+  1894→      // If this was the latest mount, also clean up all resources.
+  1895→      if (_mountId === myMountId) {
+  1896→        unsubscribePartyChannel()
+  1897→        unsubscribeInvitesChannel()
+  1898→        _restFallbackCount = 0
+  1899→        _lastSyncDbWrite = 0
+  1900→        _lastSyncSentAt = 0
+  1901→      }
+  1902→      _mountId++
+  1903→    }
+  1904→  }, [])
+  1905→
+  1906→  // ── Subscribe to invites channel when authenticated ──────
+  1907→  useEffect(() => {
+  1908→    if (status !== 'authenticated' || !user) return
+  1909→
+  1910→    const mountIdAtSubscribe = _mountId
+  1911→    subscribeInvitesChannel(user.id)
+  1912→    setConnected(true)
+  1913→
+  1914→    fetchPendingInvites(user.id).then((invites) => {
+  1915→      // Guard: don't update state if hook has re-mounted since we started
+  1916→      if (_mountId !== mountIdAtSubscribe) return
+  1917→      const store = useWatchPartyStore.getState()
+  1918→      invites.forEach((inv) => store.addInvitation(inv))
+  1919→    })
+  1920→
+  1921→    checkActiveParty(user.id)
+  1922→  }, [status, user?.id, setConnected])
+  1923→
+  1924→  // ── Disconnect on logout ──────────────────────────────────
+  1925→  useEffect(() => {
+  1926→    if (status === 'unauthenticated') {
+  1927→      unsubscribeInvitesChannel()
+  1928→      unsubscribePartyChannel()
+  1929→      setConnected(false)
+  1930→      leavePartyStore()
+  1931→    }
+  1932→  }, [status, setConnected, leavePartyStore])
+  1933→
+  1934→  // ── Auto-leave/end party on tab/app close ─────────────────
+  1935→  // beforeunload: fires on desktop tab close, unreliable in PWA/mobile.
+  1936→  // pagehide: fires reliably in PWA when swiped away (Android/iOS), also
+  1937→  //           fires on desktop tab close and navigation away. This is the
+  1938→  //           PWA-equivalent of beforeunload and is the primary signal
+  1939→  //           for mobile app termination.
+  1940→  // Both use fetch({keepalive:true}) which the browser delivers even after
+  1941→  // the page is gone. Broadcast channel.send() is synchronous.
+  1942→  useEffect(() => {
+  1943→    if (typeof window === 'undefined') return
+  1944→
+  1945→    function sendLeaveSignal(label: string) {
+  1946→      const store = useWatchPartyStore.getState()
+  1947→      if (!store.isInParty) return
+  1948→
+  1949→      const partyId = _currentPartyId ?? store.currentParty?.id
+  1950→      if (!partyId) return
+  1951→
+  1952→      // Read token synchronously from localStorage (same as getAuthToken fast-path)
+  1953→      let token: string | null = null
+  1954→      try {
+  1955→        const raw = localStorage.getItem('movera-auth-token')
+  1956→        if (raw) {
+  1957→          const session = JSON.parse(raw)
+  1958→          token = session?.access_token
+  1959→        }
+  1960→      } catch { /* no token */ }
+  1961→      if (!token) return
+  1962→
+  1963→      const action = store.isHost ? 'end' : 'leave'
+  1964→
+  1965→      // Broadcast to other members.
+  1966→      // Primary: channel.send() via WebSocket (fastest, synchronous queue).
+  1967→      // Fallback: channel.httpSend() via HTTP POST to Supabase (survives when
+  1968→      //   the local WebSocket is closing — the message goes HTTP → Supabase
+  1969→      //   server → receivers' WebSockets). This is critical for PWA close
+  1970→      //   where the WS is already tearing down.
+  1971→      if (_partyChannel) {
+  1972→        const broadcastPayload: WpBroadcastEvent = store.isHost
+  1973→          ? { t: 'ended', endedBy: user?.id } as WpEndedEvent
+  1974→          : { t: 'member-left', userId: user!.id, displayName: profile!.display_name, leftBy: user!.id } as WpMemberLeftEvent
+  1975→
+  1976→        // Try WebSocket first (fast, synchronous queue)
+  1977→        try {
+  1978→          const result = _partyChannel.send({ type: 'broadcast', event: 'wp', payload: broadcastPayload })
+  1979→          detectRestFallback(_partyChannel, result)
+  1980→        } catch {
+  1981→          // WebSocket send failed — try HTTP fallback
+  1982→          try { _partyChannel.httpSend('wp', broadcastPayload) } catch { /* best-effort */ }
+  1983→        }
+  1984→
+  1985→        // Also send via httpSend as a reliable backup path.
+  1986→        // httpSend sends via HTTP POST to Supabase's broadcast endpoint.
+  1987→        // Even if the WebSocket broadcast above succeeded, this doubles
+  1988→        // the chance that receivers get the message during page teardown.
+  1989→        try { _partyChannel.httpSend('wp', broadcastPayload) } catch { /* best-effort */ }
+  1990→      }
+  1991→
+  1992→      const apiBody = JSON.stringify({ action, partyId, token })
+  1993→
+  1994→      // Fire-and-forget API call with keepalive so it survives tab/app close.
+  1995→      // keepalive is supported on Chrome/Android but NOT on iOS WKWebView
+  1996→      // (where it is silently ignored and the fetch is cancelled).
+  1997→      try {
+  1998→        fetch('/api/watch-party', {
+  1999→          method: 'POST',
+  2000→          headers: {
+
+[showing lines 1-2000 of 2940; use offset=2001 with limit to continue reading]

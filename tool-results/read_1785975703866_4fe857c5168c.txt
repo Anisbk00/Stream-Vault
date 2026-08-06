@@ -1,0 +1,1260 @@
+     1→/**
+     2→ * Movera — WebRTC Voice Manager for Watch Party
+     3→ *
+     4→ * Manages peer-to-peer audio connections between watch party members
+     5→ * using a mesh topology. Signaling is delegated to the caller via
+     6→ * callbacks (connected to Supabase Realtime broadcast).
+     7→ *
+     8→ * Lifecycle:
+     9→ *   1. Construct with local userId
+    10→ *   2. Set signal sender + remote stream callbacks
+    11→ *   3. Call init() to request microphone access
+    12→ *   4. Call createOffer() for each remote member
+    13→ *   5. Route incoming signaling via handleOffer / handleAnswer / handleIceCandidate
+    14→ *   6. Call removePeer() when a member leaves, destroy() on party end
+    15→ */
+    16→
+    17→// ── Types ──────────────────────────────────────────────────
+    18→
+    19→export interface WebRtcSignal {
+    20→  type: 'offer' | 'answer' | 'ice-candidate'
+    21→  sdp?: string
+    22→  candidate?: RTCIceCandidateInit
+    23→}
+    24→
+    25→export type SignalSender = (targetUserId: string, signal: WebRtcSignal) => void
+    26→export type RemoteStreamHandler = (userId: string, stream: MediaStream) => void
+    27→export type RemoteStreamRemovedHandler = (userId: string) => void
+    28→
+    29→/** Signaling event shapes broadcast via Supabase Realtime */
+    30→export interface WpWebrtcOfferEvent {
+    31→  t: 'webrtc-offer'
+    32→  targetUserId: string
+    33→  fromUserId: string
+    34→  sdp: string
+    35→}
+    36→
+    37→export interface WpWebrtcAnswerEvent {
+    38→  t: 'webrtc-answer'
+    39→  targetUserId: string
+    40→  fromUserId: string
+    41→  sdp: string
+    42→}
+    43→
+    44→export interface WpWebrtcIceEvent {
+    45→  t: 'webrtc-ice'
+    46→  targetUserId: string
+    47→  fromUserId: string
+    48→  candidate: RTCIceCandidateInit
+    49→}
+    50→
+    51→export type WpWebrtcEvent =
+    52→  | WpWebrtcOfferEvent
+    53→  | WpWebrtcAnswerEvent
+    54→  | WpWebrtcIceEvent
+    55→
+    56→// ── Internal peer state ────────────────────────────────────
+    57→
+    58→/** Maximum number of simultaneous WebRTC peer connections.
+    59→ *  Mesh topology scales as N×(N-1)/2 connections total.
+    60→ *  At 8 peers = 28 connections, audio quality degrades and browser
+    61→ *  may struggle. Beyond this, new peers get voice-disabled. */
+    62→const MAX_VOICE_PEERS = 8
+    63→
+    64→interface PeerState {
+    65→  pc: RTCPeerConnection
+    66→  /** ICE candidates that arrived before the remote description was set */
+    67→  pendingIce: RTCIceCandidateInit[]
+    68→ /** Number of consecutive ICE restart attempts that failed */
+    69→  iceRestartAttempts: number
+    70→}
+    71→
+    72→/** Diagnostic info for a single peer connection (used for debugging). */
+    73→export interface PeerDiagnosticInfo {
+    74→  userId: string
+    75→  signalingState: RTCSignalingState
+    76→  iceConnectionState: RTCIceConnectionState
+    77→  connectionState: RTCPeerConnectionState
+    78→  iceRestartAttempts: number
+    79→  hasLocalAudioTrack: boolean
+    80→  hasRemoteAudioTrack: boolean
+    81→  pendingIceCandidates: number
+    82→}
+    83→
+    84→/** Diagnostic info for the entire voice manager (used for debugging). */
+    85→export interface VoiceManagerDiagnosticInfo {
+    86→  userId: string
+    87→  isInitialized: boolean
+    88→  isMuted: boolean
+    89→  isDestroyed: boolean
+    90→  hasLocalStream: boolean
+    91→  localAudioTrackCount: number
+    92→  peerCount: number
+    93→  peers: PeerDiagnosticInfo[]
+    94→  pendingRenegotiationUserIds: string[]
+    95→}
+    96→
+    97→// ── ICE Server Configuration ─────────────────────────────
+    98→// STUN + TURN servers for WebRTC NAT traversal.
+    99→//
+   100→// CRITICAL: STUN-only works on the same LAN but FAILS across different
+   101→// NATs (the common case for remote users). TURN relay servers are
+   102→// required for audio to flow when both peers are behind NAT.
+   103→// Without TURN, ICE negotiation fails → no audio on PTT.
+   104→//
+   105→// We use a two-tier approach:
+   106→//   1. Fetch TURN credentials from our API route (which uses the
+   107→//      Open Relay Project for free TURN credentials)
+   108→//   2. Fall back to STUN-only if the API is unreachable
+   109→
+   110→const STUN_ONLY_CONFIG: RTCConfiguration = {
+   111→  iceServers: [
+   112→    { urls: 'stun:stun.l.google.com:19302' },
+   113→    { urls: 'stun:stun1.l.google.com:19302' },
+   114→    { urls: 'stun:stun2.l.google.com:19302' },
+   115→    { urls: 'stun:stun3.l.google.com:19302' },
+   116→    { urls: 'stun:stun4.l.google.com:19302' },
+   117→  ],
+   118→}
+   119→
+   120→// Module-level cache for ICE server config with TURN credentials
+   121→let _cachedIceConfig: RTCConfiguration | null = null
+   122→let _iceConfigExpiry = 0
+   123→
+   124→async function fetchIceConfig(): Promise<RTCConfiguration> {
+   125→  // Return cached config if still valid
+   126→  if (_cachedIceConfig && Date.now() < _iceConfigExpiry) {
+   127→    return _cachedIceConfig
+   128→  }
+   129→
+   130→  try {
+   131→    // Auth — /api/turn-credentials requires an authenticated session.
+   132→    // Dynamic import avoids circular dependency at module load time.
+   133→    const { getAuthToken } = await import('./session-manager')
+   134→    const token = await getAuthToken()
+   135→    const controller = new AbortController()
+   136→    const timeout = setTimeout(() => controller.abort(), 6000)
+   137→    const res = await fetch('/api/turn-credentials', {
+   138→      headers: token ? { Authorization: `Bearer ${token}` } : {},
+   139→      signal: controller.signal,
+   140→    })
+   141→    clearTimeout(timeout)
+   142→
+   143→    if (res.ok) {
+   144→      const data = await res.json()
+   145→      if (data?.iceServers && Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+   146→        _cachedIceConfig = { iceServers: data.iceServers }
+   147→        _iceConfigExpiry = Date.now() + 4 * 60 * 60 * 1000
+   148→        console.log('[WebRTC] ICE config loaded:', data.iceServers.length, 'servers')
+   149→        return _cachedIceConfig
+   150→      }
+   151→    }
+   152→  } catch {
+   153→    // API unreachable — fall through to STUN-only
+   154→  }
+   155→
+   156→  _cachedIceConfig = STUN_ONLY_CONFIG
+   157→  _iceConfigExpiry = Date.now() + 30 * 60 * 1000
+   158→  return _cachedIceConfig
+   159→}
+   160→
+   161→// ── Error classification helpers ──────────────────────────
+   162→
+   163→/** Classify a DOMException / Error from getUserMedia into a user-friendly category. */
+   164→function classifyGetUserMediaError(err: unknown): string {
+   165→  if (err instanceof DOMException) {
+   166→    switch (err.name) {
+   167→      case 'NotAllowedError':
+   168→        return 'Microphone permission denied by user or system policy. Please allow microphone access in your browser settings.'
+   169→      case 'NotFoundError':
+   170→        return 'No microphone found. Please connect a microphone and try again.'
+   171→      case 'NotReadableError':
+   172→        return 'Microphone is in use by another application or the system denied access. Close other apps using the mic and try again.'
+   173→      case 'AbortError':
+   174→        return 'Microphone request was aborted (possibly due to page navigation or user cancellation).'
+   175→      case 'OverconstrainedError':
+   176→        return `Microphone constraint not supported by your device: ${(err as OverconstrainedError).constraint}. Falling back to default audio settings.`
+   177→      case 'SecurityError':
+   178→        return 'Microphone access blocked by security policy (possible due to insecure context — ensure HTTPS).'
+   179→      case 'TypeError':
+   180→        return 'Invalid audio constraints provided. This is a bug — please report it.'
+   181→    }
+   182→  }
+   183→  if (err instanceof Error) {
+   184→    return `Microphone error: ${err.message}`
+   185→  }
+   186→  return `Unknown microphone error: ${String(err)}`
+   187→}
+   188→
+   189→/** Classify a WebRTC signaling error into a user-friendly category. */
+   190→function classifySignalingError(context: string, fromUserId: string, err: unknown): string {
+   191→  const prefix = `[WebRTC] ${context} failed for ${fromUserId}`
+   192→  if (err instanceof DOMException) {
+   193→    switch (err.name) {
+   194→      case 'InvalidStateError':
+   195→        return `${prefix}: Connection is in an invalid state (${err.message})`
+   196→      case 'InvalidAccessError':
+   197→        return `${prefix}: Access denied (${err.message})`
+   198→      case 'OperationError':
+   199→        return `${prefix}: Operation failed — possibly due to glare or concurrent renegotiation (${err.message})`
+   200→      case 'RTCError':
+   201→        return `${prefix}: RTC error — ${err.message}`
+   202→    }
+   203→  }
+   204→  if (err instanceof Error) {
+   205→    return `${prefix}: ${err.message}`
+   206→  }
+   207→  return `${prefix}: ${String(err)}`
+   208→}
+   209→
+   210→// ── Manager ────────────────────────────────────────────────
+   211→
+   212→export class WebRtcVoiceManager {
+   213→  private peerConnections: Map<string, PeerState>
+   214→  private localStream: MediaStream | null
+   215→  private audioElements: Map<string, HTMLAudioElement>
+   216→  private signalSender: SignalSender | null
+   217→  private onRemoteStream: RemoteStreamHandler | null
+   218→  private onRemoteStreamRemoved: RemoteStreamRemovedHandler | null
+   219→  private userId: string
+   220→  private isMuted: boolean
+   221→  private initialized: boolean
+   222→  private destroyed: boolean
+   223→  private iceConfig: RTCConfiguration
+   224→  /** Tracks peers that need renegotiation once they reach 'stable' signaling state */
+   225→  private pendingRenegotiation: Set<string>
+   226→
+   227→  constructor(userId: string) {
+   228→    this.userId = userId
+   229→    this.peerConnections = new Map()
+   230→    this.localStream = null
+   231→    this.audioElements = new Map()
+   232→    this.signalSender = null
+   233→    this.onRemoteStream = null
+   234→    this.onRemoteStreamRemoved = null
+   235→    this.isMuted = true // start muted (PTT: unmute only while pressing)
+   236→    this.initialized = false
+   237→    this.destroyed = false
+   238→    this.iceConfig = STUN_ONLY_CONFIG // Will be upgraded in init()
+   239→    this.pendingRenegotiation = new Set()
+   240→  }
+   241→
+   242→  // ── Configuration setters ────────────────────────────────
+   243→
+   244→  /** Set the callback used to send signaling messages (connected to Supabase broadcast). */
+   245→  setSignalSender(sender: SignalSender): void {
+   246→    this.signalSender = sender
+   247→  }
+   248→
+   249→  /** Set callback fired when a remote audio stream becomes available. */
+   250→  setOnRemoteStream(handler: RemoteStreamHandler): void {
+   251→    this.onRemoteStream = handler
+   252→  }
+   253→
+   254→  /** Set callback fired when a remote peer disconnects. */
+   255→  setOnRemoteStreamRemoved(handler: RemoteStreamRemovedHandler): void {
+   256→    this.onRemoteStreamRemoved = handler
+   257→  }
+   258→
+   259→  // ── Microphone ───────────────────────────────────────────
+   260→
+   261→  /**
+   262→   * Request microphone access. Must be called once before voice can transmit.
+   263→   * Also fetches TURN credentials for NAT traversal.
+   264→   * Returns false if permission is denied — PTT UI can still render but
+   265→   * audio won't be sent.
+   266→   *
+   267→   * Audio constraints rationale:
+   268→   *   - echoCancellation: false — on iOS Safari/WebView, enabling echo
+   269→   *     cancellation causes the OS to switch the audio session to "voice chat"
+   270→   *     mode which routes audio through the earpiece AND dramatically lowers
+   271→   *     ALL output volume (audio ducking). Since watch parties have movie
+   272→   *     audio playing simultaneously, this is unacceptable. Disabling echo
+   273→   *     cancellation keeps the audio session in "ambient" mode with full
+   274→   *     volume output. Some echo may occur on speaker but this is preferable
+   275→   *     to inaudible movie audio.
+   276→   *   - noiseSuppression: true — filters background noise for cleaner voice.
+   277→   *   - autoGainControl: omitted — let the browser use its default (true on
+   278→   *     most browsers). CRITICAL: disabling AGC on iOS causes the raw mic
+   279→   *     signal to be too weak for WebRTC transmission — nobody can hear you.
+   280→   *     The iOS AGC ducking concern was a misdiagnosis; echoCancellation is
+   281→   *     the actual iOS ducking trigger, not AGC.
+   282→   *   - channelCount: omitted — let the browser/device decide the optimal
+   283→   *     channel configuration. Forcing mono (channelCount: 1) could cause
+   284→   *     OverconstrainedError on some devices.
+   285→   *   - googEchoCancellation: false (Chrome-specific advanced constraint) —
+   286→   *     prevents Chrome from applying system-wide echo cancellation which
+   287→   *     causes output volume drop even when the standard echoCancellation
+   288→   *     constraint is set to false.
+   289→   */
+   290→  async init(): Promise<boolean> {
+   291→    if (this.destroyed) return false
+   292→    if (this.initialized) return true
+   293→
+   294→    // Fetch TURN credentials in parallel with mic access
+   295→    const turnPromise = fetchIceConfig().then((config) => {
+   296→      this.iceConfig = config
+   297→    })
+   298→
+   299→    let stream!: MediaStream
+   300→    // Try multiple constraint sets in order of preference.
+   301→    // googEchoCancellation is Chrome-only — causes OverconstrainedError on
+   302→    // Firefox/Safari/Edge. We try with it first (for audio ducking
+   303→    // prevention) and fall back to simpler constraints.
+   304→    const constraintSets: MediaTrackConstraints[] = [
+   305→      {
+   306→        echoCancellation: false,
+   307→        noiseSuppression: true,
+   308→      },
+   309→      {}, // browser defaults (equivalent to { audio: true })
+   310→    ]
+   311→
+   312→    // On Chrome, also try with googEchoCancellation first
+   313→    const isChrome = /Chrome/.test(navigator.userAgent) && !/Edg/.test(navigator.userAgent)
+   314→    if (isChrome) {
+   315→      constraintSets.unshift({
+   316→        echoCancellation: false,
+   317→        noiseSuppression: true,
+   318→        googEchoCancellation: false,
+   319→      } as MediaTrackConstraints & Record<string, unknown>)
+   320→    }
+   321→
+   322→    let initSuccess = false
+   323→    for (let i = 0; i < constraintSets.length; i++) {
+   324→      try {
+   325→        const constraints = constraintSets[i]
+   326→        console.log(`[WebRTC] Mic init attempt ${i + 1}/${constraintSets.length} with constraints:`, JSON.stringify(constraints))
+   327→        stream = await navigator.mediaDevices.getUserMedia({ audio: constraints })
+   328→        initSuccess = true
+   329→        console.log(`[WebRTC] Mic init succeeded on attempt ${i + 1}`)
+   330→        break
+   331→      } catch (err) {
+   332→        const msg = classifyGetUserMediaError(err)
+   333→        console.warn(`[WebRTC] Mic init attempt ${i + 1} failed:`, msg)
+   334→        // If it's a permission denial, don't retry — user explicitly denied
+   335→        if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+   336→          console.error('[WebRTC] Microphone permission denied — aborting init')
+   337→          this.initialized = false
+   338→          return false
+   339→        }
+   340→        // For OverconstrainedError, NotFoundError, etc., try next constraint set
+   341→      }
+   342→    }
+   343→
+   344→    if (!initSuccess) {
+   345→      console.error('[WebRTC] All mic init attempts failed — microphone unavailable')
+   346→      this.initialized = false
+   347→      return false
+   348→    }
+   349→
+   350→    // Wait for TURN credentials to finish fetching (may have already resolved)
+   351→    await turnPromise.catch(() => {
+   352→      // TURN fetch failed — STUN-only config is already set as default
+   353→      console.warn('[WebRTC] TURN credential fetch failed — using STUN-only')
+   354→    })
+   355→
+   356→    this.localStream = stream
+   357→
+   358→    // Apply current muted state to the newly acquired tracks
+   359→    for (const track of stream.getAudioTracks()) {
+   360→      track.enabled = !this.isMuted
+   361→    }
+   362→
+   363→    this.initialized = true
+   364→
+   365→    // Add local tracks to any peer connections that were created before init().
+   366→    // MUST be awaited — replaceTrack is async and the track must be set
+   367→    // before any renegotiation offer is created.
+   368→    await this.addLocalTracksToExistingPeers()
+   369→
+   370→    console.log('[WebRTC] Microphone initialized, tracks:', stream.getAudioTracks().length)
+   371→    return true
+   372→  }
+   373→
+   374→  /** Mute or unmute the local audio track (push-to-talk).
+   375→   *  When muting: stops the local stream tracks entirely to release the OS
+   376→   *  audio session back to Playback mode. This is CRITICAL on iOS where
+   377→   *  AVAudioSession in .playAndRecord mode dramatically reduces output
+   378→   *  volume for the iframe video player. Stopping the tracks returns the
+   379→   *  session to .playback and movie audio returns to full volume.
+   380→   *  When unmuting: enables tracks on existing stream, or caller must
+   381→   *  re-init via init() if stream was released (this.initialized=false).
+   382→   */
+   383→  setMuted(muted: boolean): void {
+   384→    this.isMuted = muted
+   385→    if (muted) {
+   386→      if (this.localStream) {
+   387→        // Platform-aware mic release:
+   388→        // - On iOS: stop tracks entirely to return AVAudioSession to .playback
+   389→        //   mode. Without this, movie audio stays ducked between PTT presses.
+   390→        //   Note: iOS actually uses VoiceClipRecorder (not this class), but
+   391→        //   we keep the guard for any edge case where WebRTC is used on iOS.
+   392→        // - On all other platforms: just disable tracks (track.enabled = false).
+   393→        //   This keeps the stream alive for instant unmute on next PTT press,
+   394→        //   avoiding the 200-500ms getUserMedia re-acquisition latency.
+   395→        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+   396→          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+   397→
+   398→        if (isIOS) {
+   399→          for (const track of this.localStream.getAudioTracks()) {
+   400→            track.stop()
+   401→          }
+   402→          this.localStream = null
+   403→          this.initialized = false
+   404→        } else {
+   405→          // Disable but don't stop — stream stays alive for instant unmute
+   406→          for (const track of this.localStream.getAudioTracks()) {
+   407→            track.enabled = false
+   408→          }
+   409→        }
+   410→      }
+   411→    } else if (this.localStream) {
+   412→      // Stream still alive — just enable tracks (instant on non-iOS)
+   413→      for (const track of this.localStream.getAudioTracks()) {
+   414→        track.enabled = true
+   415→      }
+   416→    }
+   417→    // If stream was released (this.localStream === null, iOS path), the caller
+   418→    // (sendPttStart) will call init() which re-acquires the mic.
+   419→  }
+   420→
+   421→  /** Whether the local audio is currently muted. */
+   422→  getIsMuted(): boolean {
+   423→    return this.isMuted
+   424→  }
+   425→
+   426→  /** Whether the mic has been successfully initialized. */
+   427→  getIsInitialized(): boolean {
+   428→    return this.initialized
+   429→  }
+   430→
+   431→  /** Current number of active peer connections. */
+   432→  get peerCount(): number {
+   433→    return this.peerConnections.size
+   434→  }
+   435→
+   436→  /** Maximum number of voice peers supported (mesh topology limit). */
+   437→  static readonly MAX_VOICE_PEERS = MAX_VOICE_PEERS
+   438→
+   439→  /**
+   440→   * Return diagnostic information about all peer connections and local state.
+   441→   * Useful for debugging connection issues in production.
+   442→   */
+   443→  getDiagnosticInfo(): VoiceManagerDiagnosticInfo {
+   444→    const peers: PeerDiagnosticInfo[] = []
+   445→
+   446→    for (const [userId, peer] of this.peerConnections) {
+   447→      const transceivers = peer.pc.getTransceivers()
+   448→      const audioTransceiver = transceivers.find(
+   449→        t => t.receiver?.track?.kind === 'audio' || t.sender?.track?.kind === 'audio'
+   450→      )
+   451→
+   452→      peers.push({
+   453→        userId,
+   454→        signalingState: peer.pc.signalingState,
+   455→        iceConnectionState: peer.pc.iceConnectionState,
+   456→        connectionState: peer.pc.connectionState,
+   457→        iceRestartAttempts: peer.iceRestartAttempts,
+   458→        hasLocalAudioTrack: !!audioTransceiver?.sender?.track,
+   459→        hasRemoteAudioTrack: !!audioTransceiver?.receiver?.track,
+   460→        pendingIceCandidates: peer.pendingIce.length,
+   461→      })
+   462→    }
+   463→
+   464→    return {
+   465→      userId: this.userId,
+   466→      isInitialized: this.initialized,
+   467→      isMuted: this.isMuted,
+   468→      isDestroyed: this.destroyed,
+   469→      hasLocalStream: !!this.localStream,
+   470→      localAudioTrackCount: this.localStream?.getAudioTracks().length ?? 0,
+   471→      peerCount: this.peerConnections.size,
+   472→      peers,
+   473→      pendingRenegotiationUserIds: [...this.pendingRenegotiation],
+   474→    }
+   475→  }
+   476→
+   477→  /**
+   478→   * Renegotiate all existing peer connections.
+   479→   *
+   480→   * Called after local audio tracks are added to existing peer connections
+   481→   * (via addLocalTracksToExistingPeers) when the mic is first initialized.
+   482→   * Without renegotiation, the remote peer never learns about the new track
+   483→   * and audio won't flow.
+   484→   *
+   485→   * Creates a new offer for each peer with updated tracks.
+   486→   * Peers that are not in 'stable' signaling state are queued for
+   487→   * renegotiation once they become stable (via onsignalingstatechange).
+   488→   */
+   489→  async renegotiateAll(): Promise<void> {
+   490→    if (this.destroyed) return
+   491→    if (!this.localStream) return
+   492→
+   493→    let renegotiated = 0
+   494→    let queued = 0
+   495→
+   496→    for (const [remoteUserId, peer] of this.peerConnections) {
+   497→      // Skip peers that are mid-negotiation (signaling state must be 'stable')
+   498→      if (peer.pc.signalingState !== 'stable') {
+   499→        // Queue for renegotiation once signaling completes
+   500→        this.pendingRenegotiation.add(remoteUserId)
+   501→        queued++
+   502→        console.log('[WebRTC] Queuing renegotiation for', remoteUserId, '— signaling state:', peer.pc.signalingState)
+   503→        continue
+   504→      }
+   505→
+   506→      // Only renegotiate if the audio transceiver has a track to send.
+   507→      const transceivers = peer.pc.getTransceivers()
+   508→      const audioTransceiver = transceivers.find(
+   509→        t => t.receiver?.track?.kind === 'audio' || t.sender?.track?.kind === 'audio'
+   510→      )
+   511→      if (!audioTransceiver) continue
+   512→
+   513→      // Check that either we have a sender track OR the direction indicates
+   514→      // we intend to send.
+   515→      const hasSenderTrack = !!audioTransceiver.sender.track
+   516→      const wantsToSend = audioTransceiver.direction === 'sendrecv' || audioTransceiver.direction === 'sendonly'
+   517→      if (!hasSenderTrack && !wantsToSend) continue
+   518→
+   519→      try {
+   520→        await this.sendRenegotiationOffer(remoteUserId, peer)
+   521→        renegotiated++
+   522→      } catch (err) {
+   523→        console.warn(classifySignalingError('Renegotiation', remoteUserId, err))
+   524→      }
+   525→    }
+   526→
+   527→    if (renegotiated > 0 || queued > 0) {
+   528→      console.log('[WebRTC] RenegotiateAll complete:', renegotiated, 'renegotiated,', queued, 'queued for later')
+   529→    }
+   530→  }
+   531→
+   532→  /**
+   533→   * Send a renegotiation offer to a specific peer.
+   534→   * Extracted from renegotiateAll() for reuse by the signaling state monitor.
+   535→   */
+   536→  private async sendRenegotiationOffer(remoteUserId: string, peer: PeerState): Promise<void> {
+   537→    const transceivers = peer.pc.getTransceivers()
+   538→    const audioTransceiver = transceivers.find(
+   539→      t => t.receiver?.track?.kind === 'audio' || t.sender?.track?.kind === 'audio'
+   540→    )
+   541→    if (!audioTransceiver) return
+   542→
+   543→    const hasSenderTrack = !!audioTransceiver.sender.track
+   544→    const wantsToSend = audioTransceiver.direction === 'sendrecv' || audioTransceiver.direction === 'sendonly'
+   545→    if (!hasSenderTrack && !wantsToSend) return
+   546→
+   547→    const offer = await peer.pc.createOffer()
+   548→    await peer.pc.setLocalDescription(offer)
+   549→
+   550→    this.sendSignal(remoteUserId, {
+   551→      type: 'offer',
+   552→      sdp: peer.pc.localDescription!.sdp,
+   553→    })
+   554→    console.log('[WebRTC] Renegotiation offer sent to', remoteUserId)
+   555→  }
+   556→
+   557→  /**
+   558→   * Ensure all peer connections have audio properly configured for sending.
+   559→   * Called on EVERY PTT press to handle cases where:
+   560→   *   - The eager init's renegotiateAll() was skipped (signaling not stable)
+   561→   *   - The initial offer went out as recvonly before mic was available
+   562→   *   - replaceTrack succeeded but no new offer was ever sent
+   563→   *
+   564→   * This method checks every peer's audio transceiver and, if needed,
+   565→   * sets the track + upgrades direction, then triggers renegotiation.
+   566→   */
+   567→  async ensureAudioSending(): Promise<void> {
+   568→    if (this.destroyed || !this.localStream) return
+   569→
+   570→    const audioTrack = this.localStream.getAudioTracks()[0]
+   571→    if (!audioTrack) return
+   572→
+   573→    let needsRenegotiation = false
+   574→
+   575→    for (const [remoteUserId, peer] of this.peerConnections) {
+   576→      const transceivers = peer.pc.getTransceivers()
+   577→      const audioTransceiver = transceivers.find(
+   578→        t => t.receiver?.track?.kind === 'audio' || t.sender?.track?.kind === 'audio'
+   579→      )
+   580→
+   581→      if (!audioTransceiver) {
+   582→        // No audio transceiver — this should never happen since
+   583→        // createPeerConnection() always adds one. Destroy and
+   584→        // recreate the connection rather than using addTrack()
+   585→        // which creates a NEW transceiver and shifts m-line order,
+   586→        // causing "order of m-lines doesn't match" errors.
+   587→        console.warn('[WebRTC] No audio transceiver for peer', remoteUserId, '— recreating connection')
+   588→        this.cleanupPeer(remoteUserId)
+   589→        this.onRemoteStreamRemoved?.(remoteUserId)
+   590→        this.createOffer(remoteUserId).catch(() => {})
+   591→        continue
+   592→      } else if (!audioTransceiver.sender.track) {
+   593→        // Audio transceiver exists but no sender track — set it
+   594→        try {
+   595→          await audioTransceiver.sender.replaceTrack(audioTrack)
+   596→          audioTransceiver.direction = 'sendrecv'
+   597→          needsRenegotiation = true
+   598→          console.log('[WebRTC] Replaced null sender track for peer', remoteUserId, '— renegotiation needed')
+   599→        } catch { /* replaceTrack failed */ }
+   600→      } else if (audioTransceiver.direction !== 'sendrecv' && audioTransceiver.direction !== 'sendonly') {
+   601→        // Direction is recvonly or inactive — upgrade to sendrecv
+   602→        audioTransceiver.direction = 'sendrecv'
+   603→        needsRenegotiation = true
+   604→        console.log('[WebRTC] Upgraded audio direction to sendrecv for peer', remoteUserId, '— renegotiation needed')
+   605→      }
+   606→
+   607→      // ── Additional check: if ICE connection failed, restart it ──
+   608→      // This handles the case where STUN-only failed (no TURN was available
+   609→      // at connection time) but now we have TURN credentials.
+   610→      const iceState = peer.pc.iceConnectionState
+   611→      if (iceState === 'failed') {
+   612→        console.log('[WebRTC] ICE connection failed for', remoteUserId, '— restarting with updated ICE config')
+   613→        try {
+   614→          // Update the ICE configuration on the peer connection with
+   615→          // fresh TURN credentials, then restart ICE.
+   616→          const config = await fetchIceConfig()
+   617→          peer.pc.setConfiguration(config)
+   618→          const restartOffer = await peer.pc.createOffer({ iceRestart: true })
+   619→          await peer.pc.setLocalDescription(restartOffer)
+   620→          this.sendSignal(remoteUserId, {
+   621→            type: 'offer',
+   622→            sdp: peer.pc.localDescription!.sdp,
+   623→          })
+   624→          console.log('[WebRTC] ICE restart offer sent to', remoteUserId)
+   625→        } catch (err) {
+   626→          console.warn(classifySignalingError('ICE restart', remoteUserId, err))
+   627→        }
+   628→      }
+   629→    }
+   630→
+   631→    if (needsRenegotiation) {
+   632→      console.log('[WebRTC] Audio configuration changed — renegotiating all peers')
+   633→      await this.renegotiateAll()
+   634→    }
+   635→  }
+   636→
+   637→  // ── Offer creation ───────────────────────────────────────
+   638→
+   639→  /**
+   640→   * Create a peer connection and send an offer to `targetUserId`.
+   641→   * Called when a new member joins the party (the joiner also calls this
+   642→   * for every existing member, or the existing members call it for the joiner).
+   643→   */
+   644→  async createOffer(targetUserId: string): Promise<void> {
+   645→    if (this.destroyed) return
+   646→    if (targetUserId === this.userId) return
+   647→    if (this.peerConnections.has(targetUserId)) return
+   648→
+   649→    // Enforce voice peer cap — mesh topology doesn't scale past ~8 peers
+   650→    if (this.peerConnections.size >= MAX_VOICE_PEERS) {
+   651→      console.warn('[WebRTC] Voice peer limit reached (' + MAX_VOICE_PEERS + '), skipping offer to', targetUserId)
+   652→      return
+   653→    }
+   654→
+   655→    const peer = this.createPeerConnection(targetUserId)
+   656→
+   657→    try {
+   658→      const offer = await peer.pc.createOffer()
+   659→      await peer.pc.setLocalDescription(offer)
+   660→
+   661→      this.sendSignal(targetUserId, {
+   662→        type: 'offer',
+   663→        sdp: peer.pc.localDescription!.sdp,
+   664→      })
+   665→      console.log('[WebRTC] Offer sent to', targetUserId)
+   666→    } catch (err) {
+   667→      console.error(classifySignalingError('Create offer', targetUserId, err))
+   668→      this.cleanupPeer(targetUserId)
+   669→    }
+   670→  }
+   671→
+   672→  // ── Signaling handlers ───────────────────────────────────
+   673→
+   674→  /** Process an incoming offer from a remote user. */
+   675→  async handleOffer(fromUserId: string, sdp: string): Promise<void> {
+   676→    if (this.destroyed) return
+   677→    if (fromUserId === this.userId) return
+   678→
+   679→    // Enforce voice peer cap for incoming offers too
+   680→    if (!this.peerConnections.has(fromUserId) && this.peerConnections.size >= MAX_VOICE_PEERS) {
+   681→      console.warn('[WebRTC] Voice peer limit reached (' + MAX_VOICE_PEERS + '), rejecting offer from', fromUserId)
+   682→      return
+   683→    }
+   684→
+   685→    let peer = this.peerConnections.get(fromUserId)
+   686→
+   687→    if (!peer) {
+   688→      peer = this.createPeerConnection(fromUserId)
+   689→    }
+   690→
+   691→    try {
+   692→      // ── Polite peer pattern for WebRTC glare ──────────────
+   693→      // When both sides create offers simultaneously (glare),
+   694→      // both peer connections are in "have-local-offer" state.
+   695→      // setRemoteDescription(offer) fails in this state.
+   696→      //
+   697→      // Solution: the "polite" peer rolls back its local offer
+   698→      // and accepts the remote offer. The "impolite" peer ignores
+   699→      // the remote offer (the polite peer will handle it).
+   700→      // Deterministic rule: the user with the lexicographically
+   701→      // larger userId is the polite peer.
+   702→      const signalingState = peer.pc.signalingState
+   703→      if (signalingState === 'have-local-offer') {
+   704→        const isPolite = this.userId > fromUserId
+   705→        if (!isPolite) {
+   706→          // Impolite peer: ignore the incoming offer.
+   707→          // The polite peer will roll back and accept ours.
+   708→          return
+   709→        }
+   710→        // Polite peer: rollback our local offer and accept the remote one
+   711→        await peer.pc.setLocalDescription({ type: 'rollback' })
+   712→      }
+   713→
+   714→      console.log('[WebRTC] Remote offer received from', fromUserId, 'signaling state:', signalingState)
+   715→
+   716→      try {
+   717→        await peer.pc.setRemoteDescription({ type: 'offer', sdp })
+   718→      } catch (setRemoteErr) {
+   719→        // ── m-line order mismatch recovery ──────────────
+   720→        // setRemoteDescription(offer) fails when the remote's m-line order
+   721→        // doesn't match the previous offer/answer. This happens when
+   722→        // renegotiation changes the transceiver arrangement (e.g., addTrack
+   723→        // creates a new transceiver at the end, shifting all m-lines).
+   724→        // Recovery: destroy the peer connection entirely and create a fresh
+   725→        // one, then process the offer on the clean connection.
+   726→        const errMsg = setRemoteErr instanceof Error ? setRemoteErr.message : String(setRemoteErr)
+   727→        if (errMsg.includes('m-lines') || errMsg.includes('order of m-lines')) {
+   728→          console.warn('[WebRTC] m-line order mismatch from', fromUserId, '— destroying and recreating connection')
+   729→          this.cleanupPeer(fromUserId)
+   730→          this.onRemoteStreamRemoved?.(fromUserId)
+   731→          // Recreate with fresh peer connection and retry the offer
+   732→          peer = this.createPeerConnection(fromUserId)
+   733→          try {
+   734→            await peer.pc.setRemoteDescription({ type: 'offer', sdp })
+   735→            console.log('[WebRTC] m-line recovery successful for', fromUserId)
+   736→          } catch (retryErr) {
+   737→            console.error(classifySignalingError('m-line recovery', fromUserId, retryErr))
+   738→            return
+   739→          }
+   740→        } else {
+   741→          console.error(classifySignalingError('Offer processing', fromUserId, setRemoteErr))
+   742→          return
+   743→        }
+   744→      }
+   745→
+   746→      // If we have a local mic track, ensure our answer includes it.
+   747→      // This handles the case where the remote sent a renegotiation
+   748→      // offer after we initialized our mic — our answer should reflect
+   749→      // that we can send audio too.
+   750→      if (this.localStream) {
+   751→        const audioTrack = this.localStream.getAudioTracks()[0]
+   752→        if (audioTrack) {
+   753→          const transceivers = peer.pc.getTransceivers()
+   754→          const audioTransceiver = transceivers.find(
+   755→            t => t.receiver?.track?.kind === 'audio' || t.sender?.track?.kind === 'audio'
+   756→          )
+   757→          if (audioTransceiver && !audioTransceiver.sender.track) {
+   758→            try {
+   759→              await audioTransceiver.sender.replaceTrack(audioTrack)
+   760→              audioTransceiver.direction = 'sendrecv'
+   761→            } catch {
+   762→              // replaceTrack failed — answer will have recvonly audio
+   763→            }
+   764→          } else if (audioTransceiver && audioTransceiver.sender.track) {
+   765→            if (audioTransceiver.direction !== 'sendrecv') {
+   766→              audioTransceiver.direction = 'sendrecv'
+   767→            }
+   768→          }
+   769→        }
+   770→      }
+   771→
+   772→      // Apply any ICE candidates that arrived before the offer
+   773→      await this.flushPendingIce(fromUserId)
+   774→
+   775→      const answer = await peer.pc.createAnswer()
+   776→      await peer.pc.setLocalDescription(answer)
+   777→
+   778→      this.sendSignal(fromUserId, {
+   779→        type: 'answer',
+   780→        sdp: peer.pc.localDescription!.sdp,
+   781→      })
+   782→      console.log('[WebRTC] Answer sent to', fromUserId)
+   783→    } catch (err) {
+   784→      console.error(classifySignalingError('Offer processing (post-recovery)', fromUserId, err))
+   785→    }
+   786→  }
+   787→
+   788→  /** Process an incoming answer from a remote user. */
+   789→  async handleAnswer(fromUserId: string, sdp: string): Promise<void> {
+   790→    if (this.destroyed) return
+   791→    if (fromUserId === this.userId) return
+   792→
+   793→    const peer = this.peerConnections.get(fromUserId)
+   794→    if (!peer) return
+   795→
+   796→    try {
+   797→      await peer.pc.setRemoteDescription({ type: 'answer', sdp })
+   798→      console.log('[WebRTC] Remote answer set from', fromUserId)
+   799→
+   800→      // Apply any ICE candidates that arrived before the answer
+   801→      await this.flushPendingIce(fromUserId)
+   802→    } catch (err) {
+   803→      const errMsg = err instanceof Error ? err.message : String(err)
+   804→      if (errMsg.includes('m-lines') || errMsg.includes('order of m-lines')) {
+   805→        console.warn('[WebRTC] m-line order mismatch on answer from', fromUserId, '— destroying connection')
+   806→        this.cleanupPeer(fromUserId)
+   807→        this.onRemoteStreamRemoved?.(fromUserId)
+   808→        // Our side needs to send a fresh offer — schedule it
+   809→        this.createOffer(fromUserId).catch(() => {})
+   810→      } else {
+   811→        console.error(classifySignalingError('Answer processing', fromUserId, err))
+   812→      }
+   813→    }
+   814→  }
+   815→
+   816→  /** Process an incoming ICE candidate from a remote user. */
+   817→  async handleIceCandidate(fromUserId: string, candidate: RTCIceCandidateInit): Promise<void> {
+   818→    if (this.destroyed) return
+   819→    if (fromUserId === this.userId) return
+   820→
+   821→    const peer = this.peerConnections.get(fromUserId)
+   822→    if (!peer) return
+   823→
+   824→    // If remote description is not yet set, queue the candidate
+   825→    if (!peer.pc.remoteDescription) {
+   826→      peer.pendingIce.push(candidate)
+   827→      return
+   828→    }
+   829→
+   830→    try {
+   831→      await peer.pc.addIceCandidate(new RTCIceCandidate(candidate))
+   832→    } catch {
+   833→      // Non-fatal — ICE candidate may be superseded
+   834→    }
+   835→  }
+   836→
+   837→  // ── Peer lifecycle ───────────────────────────────────────
+   838→
+   839→  /** Remove a single peer (when a member leaves the party). */
+   840→  removePeer(userId: string): void {
+   841→    this.cleanupPeer(userId)
+   842→  }
+   843→
+   844→  /**
+   845→   * Clean up all peer connections that are in a failed or disconnected state.
+   846→   * Returns the list of user IDs whose connections were cleaned up.
+   847→   *
+   848→   * Called when the signaling channel reconnects (WebSocket recovered) to
+   849→   * ensure dead connections are destroyed and can be recreated with fresh
+   850→   * offers. Without this, createOffer() skips peers that already have
+   851→   * connections (even if those connections are permanently dead).
+   852→   */
+   853→  cleanupFailedPeers(): string[] {
+   854→    const failedPeers: string[] = []
+   855→    for (const [userId, peer] of this.peerConnections) {
+   856→      const iceState = peer.pc.iceConnectionState
+   857→      const connState = peer.pc.connectionState
+   858→      if (iceState === 'failed' || iceState === 'disconnected' || connState === 'failed' || connState === 'disconnected') {
+   859→        console.log('[WebRTC] Cleaning up dead peer connection for', userId, '(ICE:', iceState, ', conn:', connState, ')')
+   860→        this.cleanupPeer(userId)
+   861→        this.onRemoteStreamRemoved?.(userId)
+   862→        failedPeers.push(userId)
+   863→      }
+   864→    }
+   865→    return failedPeers
+   866→  }
+   867→
+   868→  /** Destroy all connections and release all resources. */
+   869→  destroy(): void {
+   870→    if (this.destroyed) return
+   871→    this.destroyed = true
+   872→
+   873→    // Close all peer connections
+   874→    for (const userId of this.peerConnections.keys()) {
+   875→      this.cleanupPeer(userId)
+   876→    }
+   877→
+   878→    // Release microphone
+   879→    if (this.localStream) {
+   880→      for (const track of this.localStream.getTracks()) {
+   881→        track.stop()
+   882→      }
+   883→      this.localStream = null
+   884→    }
+   885→
+   886→    this.signalSender = null
+   887→    this.onRemoteStream = null
+   888→    this.onRemoteStreamRemoved = null
+   889→  }
+   890→
+   891→  // ── Private helpers ──────────────────────────────────────
+   892→
+   893→  /**
+   894→   * Create an RTCPeerConnection for a remote user, wire up event
+   895→   * handlers, and add local tracks if the microphone is available.
+   896→   */
+   897→  private createPeerConnection(remoteUserId: string): PeerState {
+   898→    const pc = new RTCPeerConnection(this.iceConfig)
+   899→    const peer: PeerState = { pc, pendingIce: [], iceRestartAttempts: 0 }
+   900→
+   901→    this.peerConnections.set(remoteUserId, peer)
+   902→
+   903→    // Always add an audio transceiver so the SDP always contains an audio
+   904→    // m-line — even before the mic is initialized. Without this, peers
+   905→    // created before init() would have no audio section in their SDP,
+   906→    // and renegotiation later may silently fail (no ontrack fires on the
+   907→    // remote side, so no audio element is ever created → no sound).
+   908→    //
+   909→    // If the mic is already available, use 'sendrecv' direction so the
+   910→    // initial offer includes audio. Otherwise use 'recvonly' — the
+   911→    // direction will be upgraded when init() completes.
+   912→    const direction = this.localStream ? 'sendrecv' : 'recvonly'
+   913→    pc.addTransceiver('audio', { direction })
+   914→
+   915→    // If the mic is already available, set the track on the transceiver
+   916→    // sender and upgrade direction to sendrecv.
+   917→    if (this.localStream) {
+   918→      const audioTrack = this.localStream.getAudioTracks()[0]
+   919→      if (audioTrack) {
+   920→        const transceivers = pc.getTransceivers()
+   921→        const audioTransceiver = transceivers.find(t => t.receiver?.track?.kind === 'audio')
+   922→        if (audioTransceiver) {
+   923→          audioTransceiver.sender.replaceTrack(audioTrack)
+   924→          audioTransceiver.direction = 'sendrecv'
+   925→        } else {
+   926→          pc.addTrack(audioTrack, this.localStream)
+   927→        }
+   928→      }
+   929→    }
+   930→
+   931→    // ── ICE candidate → signal to remote ─────────────────
+   932→    pc.onicecandidate = (event) => {
+   933→      if (event.candidate) {
+   934→        this.sendSignal(remoteUserId, {
+   935→          type: 'ice-candidate',
+   936→          candidate: event.candidate.toJSON(),
+   937→        })
+   938→      }
+   939→    }
+   940→
+   941→    // ── Remote track → auto-play audio ───────────────────
+   942→    pc.ontrack = (event) => {
+   943→      // When using addTransceiver + replaceTrack (instead of addTrack(track, stream)),
+   944→      // event.streams is an empty array because no MediaStream was associated
+   945→      // with the transceiver. We must create a synthetic MediaStream from
+   946→      // the received track to enable audio playback.
+   947→      let stream = event.streams[0]
+   948→      if (!stream) {
+   949→        stream = new MediaStream([event.track])
+   950→        console.log('[WebRTC] Created synthetic MediaStream for track from', remoteUserId, '(transceiver had no stream)')
+   951→      }
+   952→
+   953→      console.log('[WebRTC] Remote track received from', remoteUserId, 'kind:', event.track.kind, 'streams:', event.streams.length)
+   954→
+   955→      // Fire callback so the UI can show voice indicators etc.
+   956→      this.onRemoteStream?.(remoteUserId, stream)
+   957→
+   958→      // Auto-play the remote audio via an HTMLAudioElement
+   959→      this.playRemoteAudio(remoteUserId, stream)
+   960→    }
+   961→
+   962→    // ── Connection state monitoring ──────────────────────
+   963→    pc.oniceconnectionstatechange = () => {
+   964→      const state = pc.iceConnectionState
+   965→      console.log('[WebRTC] ICE state for', remoteUserId, ':', state)
+   966→      if (state === 'connected' || state === 'completed') {
+   967→        // ICE connection established — audio should flow if tracks are present
+   968→        console.log('[WebRTC] Connection established with', remoteUserId)
+   969→        // Reset restart counter on successful connection
+   970→        peer.iceRestartAttempts = 0
+   971→      }
+   972→      if (state === 'disconnected') {
+   973→        // Disconnected — ICE may recover on its own, but don't wait forever.
+   974→        // If still disconnected after 10 seconds, force an ICE restart.
+   975→        // This handles the case where ICE gets stuck in 'disconnected'
+   976→        // and never transitions to 'failed' or back to 'connected'.
+   977→        console.warn('[WebRTC] ICE disconnected from', remoteUserId, '— waiting 10s before forcing restart')
+   978→        setTimeout(() => {
+   979→          if (this.destroyed) return
+   980→          // Check if this peer was cleaned up while we waited
+   981→          if (!this.peerConnections.has(remoteUserId)) return
+   982→          const currentState = pc.iceConnectionState
+   983→          if (currentState === 'disconnected') {
+   984→            console.warn('[WebRTC] ICE still disconnected after 10s for', remoteUserId, '— forcing ICE restart')
+   985→            this.restartIceForPeer(remoteUserId, peer)
+   986→          }
+   987→        }, 10_000)
+   988→      }
+   989→      if (state === 'failed') {
+   990→        // ICE failed — attempt to restart ICE with fresh TURN credentials
+   991→        console.error('[WebRTC] ICE connection failed with', remoteUserId, '— attempting ICE restart')
+   992→        this.restartIceForPeer(remoteUserId, peer)
+   993→      }
+   994→    }
+   995→
+   996→    // ── Peer connection state monitoring ──────────────────
+   997→    pc.onconnectionstatechange = () => {
+   998→      const state = pc.connectionState
+   999→      console.log('[WebRTC] Connection state for', remoteUserId, ':', state)
+  1000→      if (state === 'failed') {
+  1001→        console.error('[WebRTC] Peer connection failed with', remoteUserId)
+  1002→        this.restartIceForPeer(remoteUserId, peer)
+  1003→      }
+  1004→    }
+  1005→
+  1006→    // ── Signaling state monitoring for renegotiation ──────
+  1007→    // When we need to renegotiate (e.g., to add audio tracks after mic init),
+  1008→    // the peer must be in 'stable' signaling state. If it's not stable yet
+  1009→    // (mid initial offer/answer exchange), we queue the renegotiation and
+  1010→    // trigger it once signaling completes.
+  1011→    pc.onsignalingstatechange = () => {
+  1012→      const state = pc.signalingState
+  1013→      if (state === 'stable' && this.pendingRenegotiation.has(remoteUserId)) {
+  1014→        this.pendingRenegotiation.delete(remoteUserId)
+  1015→        console.log('[WebRTC] Signaling reached stable for', remoteUserId, '— executing queued renegotiation')
+  1016→        // Use setTimeout to avoid re-entrancy issues with signaling events
+  1017→        setTimeout(() => {
+  1018→          if (this.destroyed || !this.localStream) return
+  1019→          this.sendRenegotiationOffer(remoteUserId, peer).catch((err) => {
+  1020→            console.warn(classifySignalingError('Queued renegotiation', remoteUserId, err))
+  1021→          })
+  1022→        }, 100)
+  1023→      }
+  1024→    }
+  1025→
+  1026→    return peer
+  1027→  }
+  1028→
+  1029→  /**
+  1030→   * Restart ICE for a failed peer connection.
+  1031→   * First updates the ICE configuration with fresh TURN credentials,
+  1032→   * then sends an ICE restart offer.
+  1033→   *
+  1034→   * If ICE restart fails too many times, destroys the peer connection
+  1035→   * entirely and creates a fresh one.
+  1036→   */
+  1037→  private async restartIceForPeer(remoteUserId: string, peer: PeerState): Promise<void> {
+  1038→    peer.iceRestartAttempts++
+  1039→
+  1040→    // After 3 failed ICE restarts, destroy and recreate the connection entirely.
+  1041→    // ICE restart reuses the same RTCPeerConnection which may be in a
+  1042→    // permanently broken state. Creating a fresh PC forces a clean slate.
+  1043→    if (peer.iceRestartAttempts > 3) {
+  1044→      console.warn('[WebRTC] Too many ICE restart failures for', remoteUserId, '— destroying and recreating connection')
+  1045→      this.cleanupPeer(remoteUserId)
+  1046→      this.onRemoteStreamRemoved?.(remoteUserId)
+  1047→      // Create a fresh peer connection and offer
+  1048→      await this.createOffer(remoteUserId)
+  1049→      return
+  1050→    }
+  1051→
+  1052→    try {
+  1053→      // Refresh ICE config in case TURN credentials are now available
+  1054→      const freshConfig = await fetchIceConfig()
+  1055→      try {
+  1056→        peer.pc.setConfiguration(freshConfig)
+  1057→      } catch {
+  1058→        // setConfiguration may fail if the PC is in a bad state — continue anyway
+  1059→      }
+  1060→
+  1061→      const offer = await peer.pc.createOffer({ iceRestart: true })
+  1062→      await peer.pc.setLocalDescription(offer)
+  1063→      this.sendSignal(remoteUserId, {
+  1064→        type: 'offer',
+  1065→        sdp: peer.pc.localDescription!.sdp,
+  1066→      })
+  1067→      console.log('[WebRTC] ICE restart offer sent to', remoteUserId, '(attempt', peer.iceRestartAttempts, ')')
+  1068→    } catch (err) {
+  1069→      console.error(classifySignalingError('ICE restart', remoteUserId, err), '(attempt', peer.iceRestartAttempts, ')')
+  1070→      // Destroy and recreate the peer connection (same as >3 threshold path).
+  1071→      // Don't just cleanupPeer with no recovery — that permanently kills voice.
+  1072→      this.cleanupPeer(remoteUserId)
+  1073→      this.onRemoteStreamRemoved?.(remoteUserId)
+  1074→      try {
+  1075→        await this.createOffer(remoteUserId)
+  1076→      } catch (recreateErr) {
+  1077→        console.error('[WebRTC] Failed to recreate peer after ICE restart failure for', remoteUserId, recreateErr)
+  1078→      }
+  1079→    }
+  1080→  }
+  1081→
+  1082→  /**
+  1083→   * Add local audio tracks to peer connections that were created
+  1084→   * before init() completed (i.e. before the mic stream was available).
+  1085→   *
+  1086→   * MUST be called after init() acquires the mic stream. Replaces the
+  1087→   * null sender track on existing recvonly transceivers with the real
+  1088→   * audio track and upgrades the direction to sendrecv, enabling
+  1089→   * audio transmission in the next renegotiation.
+  1090→   */
+  1091→  private async addLocalTracksToExistingPeers(): Promise<void> {
+  1092→    if (!this.localStream) return
+  1093→    const audioTrack = this.localStream.getAudioTracks()[0]
+  1094→    if (!audioTrack) return
+  1095→
+  1096→    for (const [remoteUserId, peer] of this.peerConnections) {
+  1097→      const transceivers = peer.pc.getTransceivers()
+  1098→      const audioTransceiver = transceivers.find(
+  1099→        t => t.receiver?.track?.kind === 'audio' || t.sender?.track?.kind === 'audio'
+  1100→      )
+  1101→
+  1102→      if (audioTransceiver && !audioTransceiver.sender.track) {
+  1103→        try {
+  1104→          await audioTransceiver.sender.replaceTrack(audioTrack)
+  1105→          audioTransceiver.direction = 'sendrecv'
+  1106→          console.log('[WebRTC] Audio track added to existing peer', remoteUserId, '— direction upgraded to sendrecv')
+  1107→        } catch {
+  1108→          // replaceTrack failed — do NOT use addTrack() fallback as it
+  1109→          // creates a new transceiver that shifts m-line order
+  1110→          console.warn('[WebRTC] replaceTrack failed for peer', remoteUserId)
+  1111→        }
+  1112→      } else if (audioTransceiver && audioTransceiver.sender.track) {
+  1113→        // Track already set — just ensure direction is sendrecv
+  1114→        if (audioTransceiver.direction !== 'sendrecv') {
+  1115→          audioTransceiver.direction = 'sendrecv'
+  1116→        }
+  1117→      } else if (!audioTransceiver) {
+  1118→        // Should never happen — createPeerConnection always adds an audio
+  1119→        // transceiver. Skip addTrack() to avoid m-line order mismatch.
+  1120→        console.warn('[WebRTC] No audio transceiver for peer', remoteUserId, 'in addLocalTracksToExistingPeers')
+  1121→      }
+  1122→
+  1123→      // Also update the ICE configuration on existing peer connections
+  1124→      // in case TURN credentials are now available (they weren't when
+  1125→      // the peer was created before init() fetched them).
+  1126→      try {
+  1127→        if (this.iceConfig !== STUN_ONLY_CONFIG) {
+  1128→          peer.pc.setConfiguration(this.iceConfig)
+  1129→        }
+  1130→      } catch {
+  1131→        // setConfiguration may fail — non-critical
+  1132→      }
+  1133→    }
+  1134→  }
+  1135→
+  1136→  /**
+  1137→   * Apply all queued ICE candidates for a peer after its remote
+  1138→   * description has been set.
+  1139→   */
+  1140→  private async flushPendingIce(userId: string): Promise<void> {
+  1141→    const peer = this.peerConnections.get(userId)
+  1142→    if (!peer || peer.pendingIce.length === 0) return
+  1143→
+  1144→    const candidates = peer.pendingIce.splice(0)
+  1145→    for (const candidate of candidates) {
+  1146→      try {
+  1147→        await peer.pc.addIceCandidate(new RTCIceCandidate(candidate))
+  1148→      } catch {
+  1149→        // Non-fatal — continue flushing remaining candidates
+  1150→      }
+  1151→    }
+  1152→  }
+  1153→
+  1154→  /**
+  1155→   * Create or reuse an HTMLAudioElement to play a remote stream.
+  1156→   * This prevents audio feedback by ensuring we never play our
+  1157→   * own stream (only remote userIds reach this method).
+  1158→   *
+  1159→   * The audio element MUST be appended to the DOM (hidden) because
+  1160→   * browsers block autoplay on detached elements. We also call
+  1161→   * play() explicitly with error handling for autoplay policies.
+  1162→   */
+  1163→  private playRemoteAudio(userId: string, stream: MediaStream): void {
+  1164→    // Clean up any existing audio element for this user
+  1165→    this.stopRemoteAudio(userId)
+  1166→
+  1167→    const audio = document.createElement('audio')
+  1168→    audio.srcObject = stream
+  1169→    audio.autoplay = true
+  1170→    audio.volume = 1
+  1171→    // Hidden attribute keeps element in DOM (required for playback)
+  1172→    // without affecting layout or visibility
+  1173→    audio.setAttribute('hidden', '')
+  1174→
+  1175→    // Append to DOM — browsers block autoplay on detached audio elements.
+  1176→    // The element is hidden so it doesn't affect layout.
+  1177→    document.body.appendChild(audio)
+  1178→
+  1179→    this.audioElements.set(userId, audio)
+  1180→
+  1181→    // Explicit play() call — autoplay attribute alone is unreliable.
+  1182→    // Catch autoplay policy rejections (browser may require user gesture).
+  1183→    audio.play().then(() => {
+  1184→      console.log('[WebRTC] Remote audio playing for', userId)
+  1185→    }).catch((err) => {
+  1186→      // Autoplay blocked — will retry on next PTT press (user gesture).
+  1187→      // See retryPausedAudio() which is called from sendPttStart and
+  1188→      // also when a remote ptt-start broadcast is received.
+  1189→      console.warn('[WebRTC] Autoplay blocked for', userId, '— will retry on user gesture:', err?.name || err)
+  1190→    })
+  1191→  }
+  1192→
+  1193→  /**
+  1194→   * Retry playing any paused remote audio elements.
+  1195→   * Called during PTT activation (which is a user gesture) to work around
+  1196→   * browser autoplay policies that block audio.play() without user interaction.
+  1197→   *
+  1198→   * Also called when a remote PTT start is received — while this is NOT a
+  1199→   * user gesture on the receiver's side, some browsers allow play() in
+  1200→   * certain contexts. If still blocked, the next local PTT press will
+  1201→   * definitively unlock it.
+  1202→   */
+  1203→  retryPausedAudio(): void {
+  1204→    let retried = 0
+  1205→    for (const [userId, audio] of this.audioElements) {
+  1206→      if (audio.paused && audio.srcObject) {
+  1207→        retried++
+  1208→        audio.play().then(() => {
+  1209→          console.log('[WebRTC] Retry: remote audio now playing for', userId)
+  1210→        }).catch(() => {
+  1211→          // Still blocked — will retry on next local PTT press
+  1212→          // (which IS a user gesture and will definitely work)
+  1213→        })
+  1214→      }
+  1215→    }
+  1216→    if (retried > 0) {
+  1217→      console.log('[WebRTC] Retried', retried, 'paused remote audio element(s)')
+  1218→    }
+  1219→  }
+  1220→
+  1221→  /** Stop and remove the audio element for a remote user. */
+  1222→  private stopRemoteAudio(userId: string): void {
+  1223→    const audio = this.audioElements.get(userId)
+  1224→    if (audio) {
+  1225→      audio.srcObject = null
+  1226→      audio.pause()
+  1227→      // Remove from DOM (was appended for playback)
+  1228→      if (audio.parentNode) {
+  1229→        audio.parentNode.removeChild(audio)
+  1230→      }
+  1231→      this.audioElements.delete(userId)
+  1232→    }
+  1233→  }
+  1234→
+  1235→  /**
+  1236→   * Clean up all resources associated with a peer:
+  1237→   * close the RTCPeerConnection, stop audio playback, remove state.
+  1238→   */
+  1239→  private cleanupPeer(userId: string): void {
+  1240→    const peer = this.peerConnections.get(userId)
+  1241→    if (peer) {
+  1242→      peer.pc.onicecandidate = null
+  1243→      peer.pc.ontrack = null
+  1244→      peer.pc.oniceconnectionstatechange = null
+  1245→      peer.pc.onconnectionstatechange = null
+  1246→      peer.pc.onsignalingstatechange = null
+  1247→      peer.pc.close()
+  1248→      this.peerConnections.delete(userId)
+  1249→    }
+  1250→
+  1251→    this.pendingRenegotiation.delete(userId)
+  1252→    this.stopRemoteAudio(userId)
+  1253→  }
+  1254→
+  1255→  /** Send a signaling message to a remote user via the configured sender. */
+  1256→  private sendSignal(targetUserId: string, signal: WebRtcSignal): void {
+  1257→    this.signalSender?.(targetUserId, signal)
+  1258→  }
+  1259→}
+  1260→

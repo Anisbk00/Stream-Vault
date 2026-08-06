@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" x="0px" y="0px"
+	 viewBox="0 0 30 30" style="enable-background:new 0 0 30 30;" xml:space="preserve">
+<!-- Movera — Art Deco RetroShield on dark background. No lettermark. -->
+<rect width="30" height="30" fill="#2D2D2D"/>
+<g transform="translate(3, 3) scale(1)">
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+    <!-- Outer shield shape -->
+    <path
+      d="M12 2L3 7V12C3 16.97 7.03 21.5 12 22.5C16.97 21.5 21 16.97 21 12V7L12 2Z"
+      stroke="#D97706"
+      stroke-width="1.2"
+      stroke-linejoin="round"
+    />
+    <!-- Inner shield border -->
+    <path
+      d="M12 4.5L5.5 8.2V12C5.5 15.8 8.4 19.3 12 20.2C15.6 19.3 18.5 15.8 18.5 12V8.2L12 4.5Z"
+      stroke="#D97706"
+      stroke-width="0.72"
+      stroke-linejoin="round"
+      opacity="0.6"
+    />
+    <!-- Chevron stripes -->
+    <path
+      d="M12 8L8.5 12L12 16L15.5 12L12 8Z"
+      stroke="#D97706"
+      stroke-width="0.96"
+      stroke-linejoin="round"
+    />
+    <!-- Center diamond — filled amber -->
+    <path
+      d="M12 10L10.5 12L12 14L13.5 12L12 10Z"
+      fill="#D97706"
+      opacity="0.9"
+    />
+  </svg>
+</g>
+</svg>

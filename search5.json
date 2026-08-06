@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://www.youtube.com/watch?v=LgVk7rks-40",
+    "name": "Building a Free Movie Streaming Site with NextJS 15, and TMDb API",
+    "snippet": "Learn how to build a fully functional movie streaming website from scratch using Next.js, TMDb API for movie data, and VidSrc for streaming.",
+    "host_name": "www.youtube.com",
+    "rank": 0,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.reddit.com/r/learnprogramming/comments/1esy7m7/is_there_an_apisome_kind_of_site_where_i_can",
+    "name": "Is there an api/some kind of site where I can access videos/movies",
+    "snippet": "I haven't seen one that provides free access to legal streaming movies, mainly because of licensing issues and the high cost of streaming. If ...",
+    "host_name": "www.reddit.com",
+    "rank": 1,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://multiembed.com",
+    "name": "Multi Embed",
+    "snippet": "Add Stream. Ready to Watch? Add First Stream. Embed code example: <iframe src=\"https://embedded/embed/ucl/...\" width=\"100%\" height=\"100%\" ...></iframe>",
+    "host_name": "multiembed.com",
+    "rank": 2,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://github.com/Inside4ndroid/TMDB-Embed-API",
+    "name": "Inside4ndroid/TMDB-Embed-API - GitHub",
+    "snippet": "An api to get embed sources using tmdb id. Contribute to Inside4ndroid/TMDB-Embed-API development by creating an account on GitHub.",
+    "host_name": "github.com",
+    "rank": 3,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://embed.filmu.in",
+    "name": "FilmU — Free Video Embed API",
+    "snippet": "Free embed API for movies, TV shows & anime. Drop a single iframe into your site — multi-server streaming, subtitles, 4K quality, zero config.",
+    "host_name": "embed.filmu.in",
+    "rank": 4,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.superembed.stream",
+    "name": "SuperEmbed | Free Movie Streaming API - stream movies by IMDB ID",
+    "snippet": "SuperEmbed is the best free movie streaming API for your website. Auto embed thousands of movies and tv shows available on multiple servers.",
+    "host_name": "www.superembed.stream",
+    "rank": 5,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://autoembed.app",
+    "name": "Autoembed - Next generation Video Streaming API",
+    "snippet": "Video Streaming API. We offer free streaming links for movies and episodes that can be effortlessly integrated into your website through our embed links, API.",
+    "host_name": "autoembed.app",
+    "rank": 6,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://www.opensubtitles.com",
+    "name": "opensubtitles.com",
+    "snippet": "opensubtitles.com",
+    "host_name": "www.opensubtitles.com",
+    "rank": 7,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://watanflix.com/en",
+    "name": "Watch TV Series & Movies Online For FREE - Arabic movies",
+    "snippet": "WatanFlix is the largest platform to watch exclusive Arab series in a high quality through computers, mobiles and tablets for free",
+    "host_name": "watanflix.com",
+    "rank": 8,
+    "date": "",
+    "favicon": ""
+  },
+  {
+    "url": "https://publicapis.io/the-open-movie-database-api",
+    "name": "The Open Movie Database - Free Public API",
+    "snippet": "The most straightforward request to the API looks like this: where represents your OMDB API key, and represents the title of the movie you want to retrieve. For example, to retrieve data for a movie “The Shawshank Redemption”, replace with your API key and with the real title of the movie. Now...",
+    "host_name": "publicapis.io",
+    "rank": 9,
+    "date": "",
+    "favicon": ""
+  }
+]

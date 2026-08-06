@@ -1,0 +1,1087 @@
+     1→// HLS Downloader Engine
+     2→// Fetches HLS m3u8 manifests, selects quality, downloads segments via proxy,
+     3→// concatenates them into a single blob, and saves to the user's device.
+     4→
+     5→const PROXY_BASE = '/api/stream/proxy';
+     6→
+     7→/** Build a proxy URL. The proxy handles referer fallback automatically. */
+     8→function proxyUrl(targetUrl: string, referer?: string): string {
+     9→  let base = `${PROXY_BASE}?url=${encodeURIComponent(targetUrl)}`;
+    10→  if (referer) base += `&referer=${encodeURIComponent(referer)}`;
+    11→  return base;
+    12→}
+    13→
+    14→// ── Global concurrency semaphore ─────────────────────────────────────────────
+    15→// Caps total concurrent proxy requests across ALL active downloads.
+    16→// Without this, 3 downloads × 3 workers = 9+ concurrent requests → Vercel 503.
+    17→// The semaphore is shared at module level — all download instances cooperate.
+    18→const MAX_CONCURRENT_REQUESTS = 4;
+    19→let _activeRequests = 0;
+    20→const _requestQueue: Array<() => void> = [];
+    21→
+    22→function acquireRequestSlot(): Promise<void> {
+    23→  return new Promise((resolve) => {
+    24→    if (_activeRequests < MAX_CONCURRENT_REQUESTS) {
+    25→      _activeRequests++;
+    26→      resolve();
+    27→    } else {
+    28→      _requestQueue.push(() => {
+    29→        _activeRequests++;
+    30→        resolve();
+    31→      });
+    32→    }
+    33→  });
+    34→}
+    35→
+    36→function releaseRequestSlot(): void {
+    37→  _activeRequests = Math.max(0, _activeRequests - 1);
+    38→  const next = _requestQueue.shift();
+    39→  if (next) next();
+    40→}
+    41→
+    42→// ── Retry with exponential backoff ──────────────────────────────────────────
+    43→const MAX_RETRIES = 5;
+    44→const RETRYABLE_STATUS_CODES = new Set([502, 503, 429]);
+    45→
+    46→/** 503 gets longer initial backoff (upstream CDN overloaded) */
+    47→const BACKOFF_BASE_MS = 2000;
+    48→const BACKOFF_MAX_MS = 12000;
+    49→
+    50→/** Delay between consecutive segment downloads to avoid CDN rate-limiting */
+    51→const INTER_SEGMENT_DELAY_MS = 300;
+    52→
+    53→/** When consecutive failures exceed this, switch to aggressive backoff */
+    54→const CONSECUTIVE_FAILURE_THRESHOLD = 3;
+    55→const AGGRESSIVE_INTER_DELAY_MS = 1500;
+    56→
+    57→async function sleep(ms: number): Promise<void> {
+    58→  return new Promise((r) => setTimeout(r, ms));
+    59→}
+    60→
+    61→async function fetchWithRetry(
+    62→  url: string,
+    63→  signal?: AbortSignal,
+    64→  maxRetries = MAX_RETRIES,
+    65→): Promise<Response> {
+    66→  let lastError: Error | null = null;
+    67→
+    68→  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    69→    if (signal?.aborted) {
+    70→      throw new DOMException('Download aborted', 'AbortError');
+    71→    }
+    72→
+    73→    try {
+    74→      // Wait for a slot in the global semaphore
+    75→      await acquireRequestSlot();
+    76→      try {
+    77→        const response = await fetch(url, { signal });
+    78→        // Retry on rate-limit / server-overload errors
+    79→        if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < maxRetries) {
+    80→          lastError = new Error(`Server returned ${response.status}`);
+    81→          response.body?.cancel();
+    82→          // Exponential backoff: 2s, 4s, 8s, 12s, 12s (capped)
+    83→          const backoff = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS);
+    84→          await sleep(backoff);
+    85→          continue;
+    86→        }
+    87→        return response;
+    88→      } finally {
+    89→        releaseRequestSlot();
+    90→      }
+    91→    } catch (err) {
+    92→      releaseRequestSlot(); // ensure slot is released on network error too
+    93→      if (err instanceof DOMException && err.name === 'AbortError') {
+    94→        throw err;
+    95→      }
+    96→      lastError = err instanceof Error ? err : new Error(String(err));
+    97→      if (attempt < maxRetries) {
+    98→        const backoff = Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS);
+    99→        await sleep(backoff);
+   100→        continue;
+   101→      }
+   102→    }
+   103→  }
+   104→
+   105→  throw lastError || new Error('All retries exhausted');
+   106→}
+   107→
+   108→export interface DownloadTask {
+   109→  id: string;
+   110→  contentId: string | number;
+   111→  title: string;
+   112→  mediaType: 'movie' | 'tv';
+   113→  season?: number;
+   114→  episode?: number;
+   115→  quality: string;
+   116→  status: 'pending' | 'downloading' | 'paused' | 'completed' | 'error';
+   117→  progress: number; // 0-100
+   118→  downloadedBytes: number;
+   119→  totalBytes: number;
+   120→  speed: number; // bytes/sec
+   121→  eta: number; // seconds remaining
+   122→  url: string; // source m3u8 or direct video URL
+   123→  posterUrl?: string;
+   124→  year?: string;
+   125→  error?: string;
+   126→  startedAt: number;
+   127→  completedAt?: number;
+   128→  blob?: Blob;
+   129→  hasLocalCopy?: boolean; // true when blob is persisted in IndexedDB (survives reload)
+   130→  fileHandleName?: string; // name of saved file (for display, can't serialize FileHandle)
+   131→  /** Available subtitle tracks from the HLS manifest */
+   132→  subtitleTracks?: SubtitleTrackInfo[];
+   133→  /** Whether subtitles were downloaded alongside the video */
+   134→  hasSubtitles?: boolean;
+   135→  /** Whether this was an HLS download (vs direct MP4) */
+   136→  isHlsDownload?: boolean;
+   137→  /** Per-segment metadata for generating fake m3u8 on playback */
+   138→  segmentMeta?: SegmentMeta[];
+   139→}
+   140→
+   141→type ProgressCallback = (task: DownloadTask) => void;
+   142→
+   143→interface VariantInfo {
+   144→  bandwidth: number;
+   145→  url: string;
+   146→  resolution?: string;
+   147→}
+   148→
+   149→export interface SubtitleTrackInfo {
+   150→  /** Language code (e.g. 'en', 'fr') */
+   151→  language: string;
+   152→  /** Display name from manifest (e.g. 'English', 'Français') */
+   153→  name: string;
+   154→  /** Whether this is the default subtitle track */
+   155→  isDefault: boolean;
+   156→  /** Whether this is an auto-generated (forced) track */
+   157→  isForced: boolean;
+   158→}
+   159→
+   160→interface ParsedM3u8 {
+   161→  isMaster: boolean;
+   162→  segments: string[];
+   163→  variants?: VariantInfo[];
+   164→  subtitleTracks?: SubtitleTrackInfo[];
+   165→}
+   166→
+   167→// Parse m3u8 content (master + media playlists)
+   168→function parseM3u8(content: string): ParsedM3u8 {
+   169→  const lines = content
+   170→    .split('\n')
+   171→    .map((l) => l.trim())
+   172→    .filter(Boolean);
+   173→  const isMaster = lines.some((l) => l.startsWith('#EXT-X-STREAM-INF'));
+   174→
+   175→  // Extract subtitle tracks from #EXT-X-MEDIA tags
+   176→  const subtitleTracks: SubtitleTrackInfo[] = [];
+   177→  for (const line of lines) {
+   178→    if (line.startsWith('#EXT-X-MEDIA') && line.includes('TYPE=SUBTITLES')) {
+   179→      const language = line.match(/LANGUAGE="([^"]*)"/)?.[1] || 'und';
+   180→      const name = line.match(/NAME="([^"]*)"/)?.[1] || language;
+   181→      const isDefault = line.includes('DEFAULT=YES');
+   182→      const isForced = line.includes('FORCED=YES');
+   183→      subtitleTracks.push({ language, name, isDefault, isForced });
+   184→    }
+   185→  }
+   186→
+   187→  if (isMaster) {
+   188→    const variants: VariantInfo[] = [];
+   189→    for (let i = 0; i < lines.length; i++) {
+   190→      if (lines[i].startsWith('#EXT-X-STREAM-INF')) {
+   191→        const bandwidth = parseInt(
+   192→          lines[i].match(/BANDWIDTH=(\d+)/)?.[1] || '0',
+   193→          10
+   194→        );
+   195→        const resolution = lines[i].match(/RESOLUTION=(\d+x\d+)/)?.[1];
+   196→        // Next non-comment line is the URL
+   197→        const urlLine = lines[i + 1];
+   198→        if (urlLine && !urlLine.startsWith('#')) {
+   199→          variants.push({ bandwidth, url: urlLine, resolution });
+   200→        }
+   201→      }
+   202→    }
+   203→    return { isMaster: true, segments: [], variants, subtitleTracks: subtitleTracks.length > 0 ? subtitleTracks : undefined };
+   204→  }
+   205→
+   206→  // Media playlist - extract segment URLs
+   207→  const segments: string[] = [];
+   208→  for (let i = 0; i < lines.length; i++) {
+   209→    if (!lines[i].startsWith('#') && lines[i].includes('.')) {
+   210→      segments.push(lines[i]);
+   211→    }
+   212→  }
+   213→  return { isMaster: false, segments, variants: undefined, subtitleTracks: subtitleTracks.length > 0 ? subtitleTracks : undefined };
+   214→}
+   215→
+   216→// Extract segment URLs, their #EXTINF durations, and discontinuity markers from an m3u8 media playlist
+   217→function extractSegmentsWithDurations(playlistContent: string, baseUrl: string): { urls: string[]; durations: number[]; discontinuities: boolean[] } {
+   218→  const lines = playlistContent.split('\n').map(l => l.trim()).filter(Boolean);
+   219→  const urls: string[] = [];
+   220→  const durations: number[] = [];
+   221→  const discontinuities: boolean[] = [];
+   222→  // Track whether the next segment is preceded by #EXT-X-DISCONTINUITY
+   223→  let nextIsDiscontinuity = false;
+   224→  for (let i = 0; i < lines.length; i++) {
+   225→    if (lines[i] === '#EXT-X-DISCONTINUITY') {
+   226→      nextIsDiscontinuity = true;
+   227→      continue;
+   228→    }
+   229→    if (lines[i].startsWith('#EXTINF:')) {
+   230→      const duration = parseFloat(lines[i].split(':')[1]) || 0;
+   231→      // Find next non-comment line (the segment URL)
+   232→      for (let j = i + 1; j < lines.length; j++) {
+   233→        if (!lines[j].startsWith('#')) {
+   234→          urls.push(resolveUrl(baseUrl, lines[j]));
+   235→          durations.push(duration);
+   236→          discontinuities.push(nextIsDiscontinuity);
+   237→          nextIsDiscontinuity = false;
+   238→          break;
+   239→        }
+   240→      }
+   241→    }
+   242→  }
+   243→  return { urls, durations, discontinuities };
+   244→}
+   245→
+   246→// Resolve relative URLs
+   247→function resolveUrl(base: string, relative: string): string {
+   248→  if (relative.startsWith('http')) return relative;
+   249→  try {
+   250→    return new URL(relative, base).href;
+   251→  } catch {
+   252→    return base.substring(0, base.lastIndexOf('/') + 1) + relative;
+   253→  }
+   254→}
+   255→
+   256→// Select quality variant
+   257→function selectVariant(
+   258→  variants: VariantInfo[],
+   259→  quality: string
+   260→): string {
+   261→  if (variants.length === 0) return '';
+   262→
+   263→  // Sort by bandwidth ascending
+   264→  const sorted = [...variants].sort((a, b) => a.bandwidth - b.bandwidth);
+   265→
+   266→  if (quality === 'auto' || quality === '1080p') {
+   267→    // Pick highest
+   268→    return sorted[sorted.length - 1].url;
+   269→  }
+   270→  if (quality === '720p') {
+   271→    // Pick ~2-3Mbps or closest
+   272→    const target = sorted.find(
+   273→      (v) => v.bandwidth >= 2000000 && v.bandwidth <= 4000000
+   274→    );
+   275→    return target?.url || sorted[Math.floor(sorted.length * 0.7)].url;
+   276→  }
+   277→  if (quality === '480p') {
+   278→    // Pick lowest reasonable
+   279→    return sorted[Math.floor(sorted.length * 0.3)].url;
+   280→  }
+   281→  // Default to middle
+   282→  return sorted[Math.floor(sorted.length / 2)].url;
+   283→}
+   284→
+   285→// ── Segment data validation ──────────────────────────────────────────────────
+   286→// CDNs sometimes return HTTP 200 with HTML error pages instead of TS data.
+   287→// This is the #1 cause of "downloaded video is broken" — the blob contains
+   288→// HTML, not video. We validate every segment to catch this early.
+   289→
+   290→/** Minimum valid TS segment size in bytes. Real TS segments are typically
+   291→ *  100KB–2MB each. Anything under 1KB is almost certainly an error page. */
+   292→const MIN_SEGMENT_BYTES = 1024;
+   293→
+   294→/** TS sync byte (0x47) — every valid MPEG-TS packet starts with this */
+   295→const TS_SYNC_BYTE = 0x47;
+   296→
+   297→/** ftyp box type for MP4 — remuxed segments may start with this */
+   298→const MP4_FTYP = 0x66747970; // 'ftyp' in ASCII
+   299→
+   300→/** Check if an ArrayBuffer looks like valid video segment data (TS or fMP4).
+   301→ *  Rejects HTML error pages, empty responses, and other garbage. */
+   302→function validateSegmentData(data: ArrayBuffer, segmentIndex: number, url: string): void {
+   303→  if (data.byteLength === 0) {
+   304→    throw new Error(`Segment ${segmentIndex}: empty response (0 bytes) — CDN returned no data`);
+   305→  }
+   306→
+   307→  if (data.byteLength < MIN_SEGMENT_BYTES) {
+   308→    // Suspiciously small — likely an error page or redirect
+   309→    const preview = new Uint8Array(data, 0, Math.min(data.byteLength, 200));
+   310→    const text = new TextDecoder().decode(preview);
+   311→
+   312→    // Check for HTML error pages
+   313→    if (text.trimStart().startsWith('<') || text.includes('<html') || text.includes('<!DOCTYPE')) {
+   314→      throw new Error(
+   315→        `Segment ${segmentIndex}: CDN returned HTML error page instead of video data ` +
+   316→        `(${data.byteLength} bytes). The video source may be unavailable or blocked.`
+   317→      );
+   318→    }
+   319→
+   320→    throw new Error(
+   321→      `Segment ${segmentIndex}: response too small (${data.byteLength} bytes, minimum ${MIN_SEGMENT_BYTES}). ` +
+   322→      `The CDN may be rate-limiting or the content is unavailable.`
+   323→    );
+   324→  }
+   325→
+   326→  // Check first byte for TS sync byte or MP4 ftyp
+   327→  const firstByte = new Uint8Array(data, 0, 1)[0];
+   328→  if (firstByte === TS_SYNC_BYTE) return; // Valid TS
+   329→
+   330→  // Check for ftyp box (fMP4 init or media segment)
+   331→  if (data.byteLength >= 8) {
+   332→    const view = new DataView(data, 0, 8);
+   333→    const boxType = view.getUint32(4);
+   334→    if (boxType === MP4_FTYP) return; // Valid MP4
+   335→  }
+   336→
+   337→  // Not TS or MP4 — could be HTML error page with enough padding
+   338→  const preview = new Uint8Array(data, 0, Math.min(data.byteLength, 500));
+   339→  const text = new TextDecoder().decode(preview);
+   340→  if (text.includes('<html') || text.includes('<!DOCTYPE') || text.includes('<head')) {
+   341→    throw new Error(
+   342→      `Segment ${segmentIndex}: CDN returned HTML page instead of video data. ` +
+   343→      `The video source may be unavailable or blocked.`
+   344→    );
+   345→  }
+   346→
+   347→  // Data doesn't start with TS sync or ftyp but isn't obviously HTML.
+   348→  // Some CDNs use alternative container formats — log a warning but accept.
+   349→  console.warn(
+   350→    `[SV Download] Segment ${segmentIndex}: data doesn't start with TS sync (0x${firstByte.toString(16)}) or ftyp. ` +
+   351→    `Size: ${data.byteLength} bytes. Proceeding — may cause remux issues.`
+   352→  );
+   353→}
+   354→
+   355→// Download a single segment through proxy with retry + global semaphore
+   356→async function fetchSegment(
+   357→  url: string,
+   358→  signal?: AbortSignal,
+   359→  referer?: string,
+   360→  segmentIndex?: number,
+   361→): Promise<ArrayBuffer> {
+   362→  const response = await fetchWithRetry(proxyUrl(url, referer), signal);
+   363→  if (!response.ok) {
+   364→    throw new Error(`Failed to fetch segment: ${response.status}`);
+   365→  }
+   366→
+   367→  const data = await response.arrayBuffer();
+   368→
+   369→  // Validate segment data is actual video, not an HTML error page
+   370→  if (segmentIndex !== undefined) {
+   371→    validateSegmentData(data, segmentIndex, url);
+   372→  }
+   373→
+   374→  return data;
+   375→}
+   376→
+   377→export interface SegmentMeta {
+   378→  /** Byte offset in the concatenated blob */
+   379→  offset: number;
+   380→  /** Byte size of this segment */
+   381→  size: number;
+   382→  /** #EXTINF duration in seconds */
+   383→  duration: number;
+   384→  /** Whether an #EXT-X-DISCONTINUITY tag precedes this segment */
+   385→  discontinuity?: boolean;
+   386→}
+   387→
+   388→export interface DownloadResult {
+   389→  blob: Blob;
+   390→  /** Individual segment buffers */
+   391→  segmentBuffers?: ArrayBuffer[];
+   392→  /** Per-segment metadata (offset, size, duration) for fake m3u8 generation */
+   393→  segmentMeta?: SegmentMeta[];
+   394→  /** Downloaded subtitle VTT content, keyed by language */
+   395→  subtitles?: Record<string, string>;
+   396→  /** Subtitle track metadata from the manifest */
+   397→  subtitleTracks?: SubtitleTrackInfo[];
+   398→}
+   399→
+   400→// Main download function
+   401→export async function startDownload(
+   402→  task: DownloadTask,
+   403→  onProgress: ProgressCallback,
+   404→  abortSignal?: AbortSignal,
+   405→  referer?: string,
+   406→  preferredSubtitles?: string[],
+   407→): Promise<DownloadResult> {
+   408→  const startTime = Date.now();
+   409→  let blob: Blob;
+   410→
+   411→  // Check if it's a direct video URL (mp4) or HLS (m3u8)
+   412→  if (
+   413→    task.url.endsWith('.mp4') ||
+   414→    task.url.endsWith('.mkv') ||
+   415→    !task.url.includes('.m3u8')
+   416→  ) {
+   417→    // Direct download
+   418→    onProgress({ ...task, status: 'downloading', progress: 0 });
+   419→
+   420→    const response = await fetchWithRetry(proxyUrl(task.url, referer), abortSignal);
+   421→    const contentLength = parseInt(
+   422→      response.headers.get('Content-Length') || '0',
+   423→      10
+   424→    );
+   425→    const reader = response.body?.getReader();
+   426→
+   427→    if (!reader) throw new Error('No readable stream');
+   428→
+   429→    const chunks: Uint8Array[] = [];
+   430→    let receivedLength = 0;
+   431→
+   432→    while (true) {
+   433→      const { done, value } = await reader.read();
+   434→      if (done) break;
+   435→      if (abortSignal?.aborted) {
+   436→        throw new DOMException('Download aborted', 'AbortError');
+   437→      }
+   438→
+   439→      chunks.push(value);
+   440→      receivedLength += value.length;
+   441→
+   442→      const progress =
+   443→        contentLength > 0
+   444→          ? Math.min(99, (receivedLength / contentLength) * 100)
+   445→          : 0;
+   446→      const elapsed = (Date.now() - startTime) / 1000;
+   447→      const speed = elapsed > 0 ? receivedLength / elapsed : 0;
+   448→      const eta = speed > 0 ? (contentLength - receivedLength) / speed : 0;
+   449→
+   450→      onProgress({
+   451→        ...task,
+   452→        status: 'downloading',
+   453→        progress,
+   454→        downloadedBytes: receivedLength,
+   455→        totalBytes: contentLength,
+   456→        speed,
+   457→        eta,
+   458→      });
+   459→    }
+   460→
+   461→    blob = new Blob(chunks.map(c => c.buffer as ArrayBuffer), { type: 'video/mp4' });
+   462→
+   463→    // ── Direct download integrity check ──────────────────────────────
+   464→    if (blob.size < 100_000) {
+   465→      throw new Error(
+   466→        `Downloaded file is only ${(blob.size / 1024).toFixed(1)} KB — ` +
+   467→        `too small to be valid video. The download may have been interrupted or the source is unavailable.`
+   468→      );
+   469→    }
+   470→    // Validate the blob starts with ftyp (MP4) or TS sync byte
+   471→    const headerSlice = blob.slice(0, 12);
+   472→    const headerBuf = await headerSlice.arrayBuffer();
+   473→    if (headerBuf.byteLength >= 8) {
+   474→      const headerView = new DataView(headerBuf);
+   475→      const boxType = headerView.getUint32(4);
+   476→      const firstByte = new Uint8Array(headerBuf)[0];
+   477→      if (boxType !== MP4_FTYP && firstByte !== TS_SYNC_BYTE) {
+   478→        // Check if it's an HTML error page
+   479→        const preview = new Uint8Array(headerBuf, 0, Math.min(headerBuf.byteLength, 200));
+   480→        const text = new TextDecoder().decode(preview);
+   481→        if (text.trimStart().startsWith('<') || text.includes('<html')) {
+   482→          throw new Error(
+   483→            `Downloaded file is an HTML page, not video. The CDN may be blocking access. ` +
+   484→            `Try a different content source.`
+   485→          );
+   486→        }
+   487→        console.warn(
+   488→          `[SV Download] Direct download: blob doesn't start with MP4 ftyp or TS sync byte (0x${firstByte.toString(16)}). ` +
+   489→          `File may be corrupted or in an unsupported format.`
+   490→        );
+   491→      }
+   492→    }
+   493→    // Direct download complete
+   494→  } else {
+   495→    // HLS download
+   496→    onProgress({ ...task, status: 'downloading', progress: 0 });
+   497→
+   498→    // Step 1: Fetch m3u8 manifest
+   499→    const manifestResponse = await fetchWithRetry(proxyUrl(task.url, referer), abortSignal);
+   500→    const manifestContent = await manifestResponse.text();
+   501→
+   502→    // Validate manifest is actually m3u8, not an HTML error page
+   503→    if (manifestContent.trimStart().startsWith('<') || manifestContent.includes('<!DOCTYPE') || manifestContent.includes('<html')) {
+   504→      throw new Error(
+   505→        `Video source returned an error page instead of a video manifest. ` +
+   506→        `The content may be unavailable or the CDN is blocking access. Try a different source.`
+   507→      );
+   508→    }
+   509→    if (!manifestContent.includes('#EXT')) {
+   510→      throw new Error(
+   511→        `Video source did not return a valid HLS manifest. ` +
+   512→        `The URL may be incorrect or the content is no longer available.`
+   513→      );
+   514→    }
+   515→
+   516→    const parsed = parseM3u8(manifestContent);
+   517→
+   518→    let segmentUrls: string[] = [];
+   519→    let segmentDurations: number[] = [];
+   520→    let segmentDiscontinuities: boolean[] = [];
+   521→    let subtitleTracks: SubtitleTrackInfo[] | undefined;
+   522→
+   523→    if (parsed.isMaster && parsed.variants && parsed.variants.length > 0) {
+   524→      // Master playlist - select quality and fetch sub-playlist
+   525→      const variantUrl = selectVariant(parsed.variants, task.quality);
+   526→      const absoluteVariantUrl = resolveUrl(task.url, variantUrl);
+   527→      const subResponse = await fetchWithRetry(proxyUrl(absoluteVariantUrl, referer), abortSignal);
+   528→      const subContent = await subResponse.text();
+   529→
+   530→      // Validate sub-playlist is actually m3u8, not an error page
+   531→      if (subContent.trimStart().startsWith('<') || subContent.includes('<!DOCTYPE') || subContent.includes('<html')) {
+   532→        throw new Error(
+   533→          `Video quality variant returned an error page. ` +
+   534→          `The content may be unavailable in the selected quality. Try a different source.`
+   535→        );
+   536→      }
+   537→
+   538→      // Parse segments with durations and discontinuities from sub-playlist
+   539→      const { urls: segUrls, durations: segDurs, discontinuities: segDiscont } = extractSegmentsWithDurations(subContent, absoluteVariantUrl);
+   540→      segmentUrls = segUrls;
+   541→      segmentDurations = segDurs;
+   542→      segmentDiscontinuities = segDiscont;
+   543→      // Subtitle tracks come from the master manifest
+   544→      subtitleTracks = parsed.subtitleTracks;
+   545→    } else if (parsed.segments.length > 0) {
+   546→      // Direct media playlist
+   547→      const { urls: segUrls, durations: segDurs, discontinuities: segDiscont } = extractSegmentsWithDurations(manifestContent, task.url);
+   548→      segmentUrls = segUrls;
+   549→      segmentDurations = segDurs;
+   550→      segmentDiscontinuities = segDiscont;
+   551→      subtitleTracks = parsed.subtitleTracks;
+   552→    } else {
+   553→      throw new Error('No segments found in m3u8 playlist');
+   554→    }
+   555→
+   556→    // Step 2: Download all segments
+   557→    const totalSegments = segmentUrls.length;
+   558→    const chunks: (Uint8Array | undefined)[] = new Array(totalSegments);
+   559→    let totalDownloadedBytes = 0;
+   560→    let estimatedTotalBytes = 0;
+   561→    let firstSegmentSize = 0; // Used to estimate total download size
+   562→
+   563→    // Download segments
+   564→    // (global semaphore caps total across all downloads to 4)
+   565→    const PER_DOWNLOAD_CONCURRENCY = 3;
+   566→    let completedSegments = 0;
+   567→    let nextSegmentIndex = 0;
+   568→    let failedSegments = 0;
+   569→    let consecutiveFailures = 0;
+   570→    let validationFailures = 0; // Segments that failed validation (not retry errors)
+   571→
+   572→    const downloadNext = async (): Promise<void> => {
+   573→      while (nextSegmentIndex < segmentUrls.length) {
+   574→        const index = nextSegmentIndex++;
+   575→        const segUrl = segmentUrls[index];
+   576→        if (abortSignal?.aborted) {
+   577→          throw new DOMException('Download aborted', 'AbortError');
+   578→        }
+   579→
+   580→        // Inter-segment delay to avoid overwhelming CDN
+   581→        if (completedSegments > 0) {
+   582→          const delay = consecutiveFailures >= CONSECUTIVE_FAILURE_THRESHOLD
+   583→            ? AGGRESSIVE_INTER_DELAY_MS
+   584→            : INTER_SEGMENT_DELAY_MS;
+   585→          await sleep(delay);
+   586→        }
+   587→
+   588→        try {
+   589→          const data = await fetchSegment(segUrl, abortSignal, referer, index);
+   590→          chunks[index] = new Uint8Array(data);
+   591→          totalDownloadedBytes += data.byteLength;
+   592→          consecutiveFailures = 0; // reset on success
+   593→
+   594→          // Estimate total size from first segment
+   595→          if (firstSegmentSize === 0 && data.byteLength >= MIN_SEGMENT_BYTES) {
+   596→            firstSegmentSize = data.byteLength;
+   597→            estimatedTotalBytes = firstSegmentSize * totalSegments;
+   598→            console.log(
+   599→              `[SV Download] Size estimate: first segment ${(firstSegmentSize / 1024).toFixed(1)} KB × ${totalSegments} = ` +
+   600→              `${(estimatedTotalBytes / 1024 / 1024).toFixed(1)} MB estimated total`
+   601→            );
+   602→          }
+   603→        } catch (err) {
+   604→          if (err instanceof DOMException && err.name === 'AbortError') {
+   605→            throw err;
+   606→          }
+   607→          // Check if this was a validation failure (HTML error page, etc.)
+   608→          const errMsg = err instanceof Error ? err.message : String(err);
+   609→          if (errMsg.includes('HTML') || errMsg.includes('too small') || errMsg.includes('empty response')) {
+   610→            validationFailures++;
+   611→            console.error(`[SV Download] VALIDATION FAILURE on segment ${index}: ${errMsg}`);
+   612→            // If >30% of first 10 segments fail validation, abort early —
+   613→            // the entire stream is likely unavailable/blocked
+   614→            if (validationFailures >= 3 && completedSegments < 10 && (validationFailures / (completedSegments + 1)) > 0.3) {
+   615→              throw new Error(
+   616→                `Download aborted: ${validationFailures} segments failed validation. ` +
+   617→                `The video source appears to be unavailable or blocked by the CDN. ` +
+   618→                `Try a different content source.`
+   619→              );
+   620→            }
+   621→          }
+   622→          failedSegments++;
+   623→          consecutiveFailures++;
+   624→        }
+   625→
+   626→        completedSegments++;
+   627→        const progress = Math.min(
+   628→          99,
+   629→          (completedSegments / totalSegments) * 100
+   630→        );
+   631→        const elapsed = (Date.now() - startTime) / 1000;
+   632→        const speed = elapsed > 0 ? totalDownloadedBytes / elapsed : 0;
+   633→        // Use estimated total for accurate ETA once we have it
+   634→        const effectiveTotal = estimatedTotalBytes > 0 ? estimatedTotalBytes : totalDownloadedBytes;
+   635→        const eta =
+   636→          speed > 0 ? Math.max(0, (effectiveTotal - totalDownloadedBytes) / speed) : 0;
+   637→
+   638→        onProgress({
+   639→          ...task,
+   640→          status: 'downloading',
+   641→          progress,
+   642→          downloadedBytes: totalDownloadedBytes,
+   643→          totalBytes: Math.max(effectiveTotal, totalDownloadedBytes),
+   644→          speed,
+   645→          eta,
+   646→        });
+   647→      }
+   648→    };
+   649→
+   650→    // Launch concurrent download workers (per-download concurrency)
+   651→    const workerCount = Math.min(PER_DOWNLOAD_CONCURRENCY, totalSegments);
+   652→    const workers = Array.from({ length: workerCount }, () => downloadNext());
+   653→    await Promise.all(workers);
+   654→
+   655→    // ── Second pass: retry any failed segments ──────────────────────────
+   656→    // The initial concurrent pass may leave gaps when the CDN rate-limits
+   657→    // (503/429) — 5 retries with 2-12s backoff isn't always enough under
+   658→    // heavy concurrency. The second pass retries one segment at a time with
+   659→    // longer delays, which avoids rate-limiting. Missing segments cause
+   660→    // visible gaps in the video and corrupt the segment-index-to-meta
+   661→    // mapping used by the MemoryHlsLoader, so every segment must succeed.
+   662→    const failedIndices: number[] = [];
+   663→    for (let i = 0; i < chunks.length; i++) {
+   664→      if (chunks[i] === undefined) failedIndices.push(i);
+   665→    }
+   666→
+   667→    if (failedIndices.length > 0) {
+   668→      console.log(`[SV Download] Retry pass: ${failedIndices.length} failed segments to retry`);
+   669→
+   670→      const RETRY_PASS_MAX_ATTEMPTS = 10;
+   671→      const RETRY_PASS_DELAY_MS = 2000;
+   672→
+   673→      for (const idx of failedIndices) {
+   674→        if (abortSignal?.aborted) {
+   675→          throw new DOMException('Download aborted', 'AbortError');
+   676→        }
+   677→        let succeeded = false;
+   678→        let lastRetryError = '';
+   679→        for (let attempt = 0; attempt < RETRY_PASS_MAX_ATTEMPTS; attempt++) {
+   680→          if (abortSignal?.aborted) {
+   681→            throw new DOMException('Download aborted', 'AbortError');
+   682→          }
+   683→          try {
+   684→            await sleep(RETRY_PASS_DELAY_MS * (attempt + 1)); // progressive delay: 2s, 4s, 6s...
+   685→            const data = await fetchSegment(segmentUrls[idx], abortSignal, referer, idx);
+   686→            chunks[idx] = new Uint8Array(data);
+   687→            totalDownloadedBytes += data.byteLength;
+   688→            failedSegments--;
+   689→            succeeded = true;
+   690→            break;
+   691→          } catch (err) {
+   692→            lastRetryError = err instanceof Error ? err.message : String(err);
+   693→            // Continue retrying
+   694→          }
+   695→        }
+   696→        if (!succeeded) {
+   697→          throw new Error(
+   698→            `Segment ${idx + 1}/${totalSegments} failed after exhaustive retry. ` +
+   699→            `Last error: ${lastRetryError}. ` +
+   700→            'The server may be rate-limiting or the content is unavailable.'
+   701→          );
+   702→        }
+   703→      }
+   704→    }
+   705→
+   706→    // ── Post-download integrity check ─────────────────────────────────
+   707→    // If too many validation failures occurred during download, the final
+   708→    // blob will be corrupted. Fail explicitly instead of producing a broken file.
+   709→    if (validationFailures > 0) {
+   710→      const validSegments = totalSegments - failedSegments;
+   711→      const validRatio = validSegments / totalSegments;
+   712→      if (validRatio < 0.8) {
+   713→        throw new Error(
+   714→          `Download integrity check failed: only ${validSegments}/${totalSegments} segments ` +
+   715→          `are valid (${(validRatio * 100).toFixed(0)}%). The video would be corrupted. ` +
+   716→          `${validationFailures} segments contained invalid data (likely CDN blocking). ` +
+   717→          `Try a different content source.`
+   718→        );
+   719→      }
+   720→      console.warn(
+   721→        `[SV Download] ⚠️ ${validationFailures} segments failed validation but ${validSegments}/${totalSegments} ` +
+   722→        `are valid (${(validRatio * 100).toFixed(0)}%) — proceeding with partial content. ` +
+   723→        `Some gaps may appear during playback.`
+   724→      );
+   725→    }
+   726→
+   727→    // Build segment buffers array — all segments are guaranteed present after retry pass.
+   728→    const segmentBuffers: ArrayBuffer[] = [];
+   729→    const segmentMeta: SegmentMeta[] = [];
+   730→    let runningOffset = 0;
+   731→    let skippedEmptySegments = 0;
+   732→
+   733→    for (let i = 0; i < chunks.length; i++) {
+   734→      const chunk = chunks[i];
+   735→      if (!chunk || chunk.length === 0) {
+   736→        skippedEmptySegments++;
+   737→        // CRITICAL: Even if a segment is empty, we MUST push a placeholder in segmentMeta
+   738→        // to maintain index alignment. Without this, the MemoryHlsLoader byte offsets
+   739→        // will be wrong for ALL subsequent segments.
+   740→        if (chunk && chunk.length === 0) {
+   741→          console.warn(`[SV Download] Segment ${i} is EMPTY (0 bytes) — this will cause playback issues`);
+   742→          segmentMeta.push({
+   743→            offset: runningOffset,
+   744→            size: 0,
+   745→            duration: segmentDurations[i] || 10,
+   746→            discontinuity: segmentDiscontinuities[i] || false,
+   747→          });
+   748→        }
+   749→        continue;
+   750→      }
+   751→
+   752→      const buf = chunk.buffer as ArrayBuffer;
+   753→      segmentBuffers.push(buf);
+   754→
+   755→      // Keep segmentMeta for backward compatibility with old downloads that
+   756→      // use the MemoryHlsLoader path. New downloads will be remuxed to MP4.
+   757→      segmentMeta.push({
+   758→        offset: runningOffset,
+   759→        size: buf.byteLength,
+   760→        duration: segmentDurations[i] || 10,
+   761→        discontinuity: segmentDiscontinuities[i] || false,
+   762→      });
+   763→      runningOffset += buf.byteLength;
+   764→    }
+   765→
+   766→    console.log(
+   767→      `[SV Download] Segment assembly: ${segmentBuffers.length} buffers, ${skippedEmptySegments} empty/skipped, ` +
+   768→      `total ${(runningOffset / 1024 / 1024).toFixed(2)} MB, ` +
+   769→      `segmentMeta count: ${segmentMeta.length} (expected: ${chunks.length})`,
+   770→    );
+   771→
+   772→    if (segmentMeta.length !== chunks.length) {
+   773→      console.error(
+   774→        `[SV Download] INDEX MISMATCH: segmentMeta has ${segmentMeta.length} entries but chunks has ${chunks.length}. ` +
+   775→        `This WILL cause MemoryHlsLoader byte-offset misalignment and playback corruption!`,
+   776→      );
+   777→    }
+   778→
+   779→    // ── Remux TS → MP4 ──────────────────────────────────────────────────
+   780→    // Convert raw TS segments to a fragmented MP4 (fMP4) file that browsers
+   781→    // can play natively. This eliminates HLS.js from the offline playback
+   782→    // path, fixing freezing and A/V desync caused by HLS.js's network-
+   783→    // oriented buffer management. Netflix and all major platforms remux
+   784→    // downloaded content to MP4 for native playback.
+   785→    //
+   786→    // A single Transmuxer instance processes ALL segments sequentially,
+   787→    // ensuring continuous base_media_decode_time across the entire video.
+   788→    // The previous per-segment transmux approach produced discontinuous
+   789→    // decode times in each moof box, causing "video freezes, audio plays".
+   790→    try {
+   791→      console.log(`[SV Download] Attempting TS→MP4 remux with ${segmentBuffers.length} segment buffers...`);
+   792→      const { remuxTsToMp4 } = await import('@/lib/ts-to-mp4');
+   793→      blob = await remuxTsToMp4(segmentBuffers, task.id);
+   794→      console.log(
+   795→        `[SV Download] Remux SUCCESS — fMP4 blob: ${blob.size} bytes, type: '${blob.type}'`,
+   796→      );
+   797→
+   798→      // ── Post-remux integrity check ──────────────────────────────────
+   799→      // Validate the remuxed blob is actually playable video.
+   800→      if (blob.size < 100_000) {
+   801→        // < 100KB for an entire movie/episode is definitely broken
+   802→        throw new Error(
+   803→          `Remuxed file is only ${(blob.size / 1024).toFixed(1)} KB — ` +
+   804→          `too small to be valid video. The source data may be corrupted.`
+   805→        );
+   806→      }
+   807→      // Quick check: fMP4 must start with ftyp box
+   808→      const headerSlice = blob.slice(0, 12);
+   809→      const headerBuf = await headerSlice.arrayBuffer();
+   810→      const headerView = new DataView(headerBuf);
+   811→      if (headerBuf.byteLength >= 8) {
+   812→        const boxType = headerView.getUint32(4);
+   813→        if (boxType !== MP4_FTYP) {
+   814→          throw new Error(
+   815→            `Remuxed file doesn't start with ftyp box — invalid fMP4 structure. ` +
+   816→            `The remux produced garbage data.`
+   817→          );
+   818→        }
+   819→      }
+   820→    } catch (remuxErr) {
+   821→      // If the error is from our own integrity checks, re-throw it
+   822→      // (don't fall back to raw TS for something that's fundamentally broken)
+   823→      const msg = remuxErr instanceof Error ? remuxErr.message : String(remuxErr);
+   824→      if (msg.includes('too small to be valid') || msg.includes("doesn't start with ftyp")) {
+   825→        console.error(`[SV Download] Remux integrity check FAILED: ${msg}`);
+   826→        throw remuxErr;
+   827→      }
+   828→
+   829→      // Remux failed — fall back to raw TS blob + MemoryHlsLoader path.
+   830→      // This preserves backward compatibility and handles edge cases where
+   831→      // the TS data uses codecs mux.js doesn't support.
+   832→      console.error(
+   833→        `[SV Download] Remux FAILED — falling back to raw TS + MemoryHlsLoader path.`,
+   834→        `Error: ${msg}`,
+   835→        `This is the LIKELY CAUSE of freezing/desync if it keeps happening.`,
+   836→        `Raw TS playback via HLS.js MemoryHlsLoader is inherently fragile.`,
+   837→      );
+   838→      blob = new Blob(segmentBuffers, { type: 'video/mp2t' });
+   839→
+   840→      // Validate raw TS blob too
+   841→      if (blob.size < 100_000) {
+   842→        throw new Error(
+   843→          `Downloaded file is only ${(blob.size / 1024).toFixed(1)} KB — ` +
+   844→          `too small to be valid video. The CDN may have returned error pages instead of video data. ` +
+   845→          `Try a different content source.`
+   846→        );
+   847→      }
+   848→      console.log(
+   849→        `[SV Download] Fallback: raw TS blob created — ${blob.size} bytes, type: '${blob.type}'`,
+   850→      );
+   851→    }
+   852→    // HLS download complete
+   853→
+   854→    // Step 3: Download subtitles if available
+   855→    const subtitles: Record<string, string> = {};
+   856→    if (subtitleTracks && subtitleTracks.length > 0) {
+   857→      // Download each subtitle track independently using its own URI from
+   858→      // the #EXT-X-MEDIA tag in the master manifest. Previously this code
+   859→      // required a single "subGroupLine" with URI= to exist, which blocked
+   860→      // all subtitle downloads when the first EXT-X-MEDIA line didn't have
+   861→      // a URI attribute (some manifests use GROUP-ID references instead).
+   862→      for (const subTrack of subtitleTracks) {
+   863→        // Filter by user's preferred subtitle languages (if set)
+   864→        // Empty preferredSubtitles = download all available
+   865→        if (preferredSubtitles && preferredSubtitles.length > 0 && !preferredSubtitles.includes(subTrack.language)) continue;
+   866→        const lang = subTrack.language;
+   867→        // Find the subtitle media tag for this language
+   868→        const mediaLine = manifestContent.split('\n').find(
+   869→          (l) => l.includes('#EXT-X-MEDIA') && l.includes('TYPE=SUBTITLES') && l.includes(`LANGUAGE="${lang}"`)
+   870→        );
+   871→        if (!mediaLine) continue;
+   872→
+   873→        // Find URI for this specific track
+   874→        const trackUriMatch = mediaLine.match(/URI="([^"]*)"/);
+   875→        if (!trackUriMatch) continue;
+   876→
+   877→        const trackPlaylistUrl = resolveUrl(task.url, trackUriMatch[1]);
+   878→        try {
+   879→          const trackResp = await fetchWithRetry(proxyUrl(trackPlaylistUrl, referer), abortSignal);
+   880→          const trackText = await trackResp.text();
+   881→          const trackLines = trackText.split('\n').map(l => l.trim()).filter(Boolean);
+   882→
+   883→          // Collect subtitle segment URLs
+   884→          const subSegments: string[] = [];
+   885→          for (let i = 0; i < trackLines.length; i++) {
+   886→            if (!trackLines[i].startsWith('#') && trackLines[i].includes('.')) {
+   887→              subSegments.push(resolveUrl(trackPlaylistUrl, trackLines[i]));
+   888→            }
+   889→          }
+   890→
+   891→          if (subSegments.length > 0) {
+   892→            // Download all subtitle segments and merge
+   893→            let mergedVtt = 'WEBVTT\n\n';
+   894→            let cumulOffset = 0;
+   895→
+   896→            for (const segUrl of subSegments) {
+   897→              try {
+   898→                const segResp = await fetchWithRetry(proxyUrl(segUrl, referer), abortSignal);
+   899→                let segText = await segResp.text();
+   900→
+   901→                // Strip WEBVTT header from subsequent segments
+   902→                if (mergedVtt.length > 8) {
+   903→                  segText = segText.replace(/^WEBVTT[^\n]*\n*/i, '');
+   904→                }
+   905→
+   906→                // Adjust timestamps if there are multiple segments
+   907→                if (subSegments.length > 1 && cumulOffset > 0) {
+   908→                  segText = adjustVttTimestamps(segText, cumulOffset);
+   909→                }
+   910→
+   911→                // Estimate duration from last timestamp for offset calc
+   912→                const lastTs = parseLastVttTimestamp(segText);
+   913→                cumulOffset += lastTs;
+   914→
+   915→                mergedVtt += segText + '\n';
+   916→              } catch {
+   917→                // Skip failed subtitle segments — non-critical
+   918→              }
+   919→            }
+   920→
+   921→            if (mergedVtt.length > 10) {
+   922→              subtitles[lang] = mergedVtt;
+   923→            }
+   924→          }
+   925→        } catch {
+   926→          // Skip failed subtitle track — non-critical
+   927→        }
+   928→      }
+   929→    }
+   930→
+   931→    return {
+   932→      blob,
+   933→      segmentBuffers,
+   934→      segmentMeta: segmentMeta.length > 0 ? segmentMeta : undefined,
+   935→      subtitles: Object.keys(subtitles).length > 0 ? subtitles : undefined,
+   936→      subtitleTracks,
+   937→    };
+   938→  }
+   939→
+   940→  return { blob };
+   941→}
+   942→
+   943→// File System Access API types
+   944→interface SaveFilePickerOptions {
+   945→  suggestedName?: string;
+   946→  types?: Array<{
+   947→    description: string;
+   948→    accept: Record<string, string[]>;
+   949→  }>;
+   950→}
+   951→
+   952→interface FileHandleWithWrite {
+   953→  createWritable: () => Promise<{
+   954→    write: (data: Blob) => Promise<void>;
+   955→    close: () => Promise<void>;
+   956→  }>;
+   957→}
+   958→
+   959→// Check if File System Access API is available
+   960→function hasFileSystemAccess(): boolean {
+   961→  return 'showSaveFilePicker' in window;
+   962→}
+   963→
+   964→// Show save file picker
+   965→async function showSaveFilePicker(
+   966→  options: SaveFilePickerOptions
+   967→): Promise<FileHandleWithWrite> {
+   968→  return (
+   969→    window as unknown as {
+   970→      showSaveFilePicker: (
+   971→        opts: SaveFilePickerOptions
+   972→      ) => Promise<FileHandleWithWrite>;
+   973→    }
+   974→  ).showSaveFilePicker(options);
+   975→}
+   976→
+   977→// Save blob to user's filesystem using File System Access API (or fallback)
+   978→export async function saveDownload(
+   979→  blob: Blob,
+   980→  filename: string
+   981→): Promise<{ saved: boolean; fileName: string; filePath?: string }> {
+   982→  // Try File System Access API (Chrome/Edge)
+   983→  if (hasFileSystemAccess()) {
+   984→    try {
+   985→      const handle = await showSaveFilePicker({
+   986→        suggestedName: filename,
+   987→        types: [
+   988→          {
+   989→            description: 'Video File',
+   990→            accept: {
+   991→              'video/mp4': ['.mp4'],
+   992→              'video/mp2t': ['.ts'],
+   993→              'video/*': ['.mp4', '.ts', '.mkv'],
+   994→            },
+   995→          },
+   996→        ],
+   997→      });
+   998→      const writable = await handle.createWritable();
+   999→      await writable.write(blob);
+  1000→      await writable.close();
+  1001→
+  1002→      return { saved: true, fileName: filename };
+  1003→    } catch (err) {
+  1004→      if (err instanceof DOMException && err.name === 'AbortError') {
+  1005→        return { saved: false, fileName: filename }; // User cancelled
+  1006→      }
+  1007→      // Fall through to fallback
+  1008→    }
+  1009→  }
+  1010→
+  1011→  // Fallback: trigger browser download
+  1012→  const url = URL.createObjectURL(blob);
+  1013→  const a = document.createElement('a');
+  1014→  a.href = url;
+  1015→  a.download = filename;
+  1016→  a.style.display = 'none';
+  1017→  document.body.appendChild(a);
+  1018→  a.click();
+  1019→  document.body.removeChild(a);
+  1020→  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  1021→
+  1022→  return { saved: true, fileName: filename };
+  1023→}
+  1024→
+  1025→// Format bytes to human readable
+  1026→export function formatBytes(bytes: number): string {
+  1027→  if (bytes === 0) return '0 B';
+  1028→  const k = 1024;
+  1029→  const sizes = ['B', 'KB', 'MB', 'GB'];
+  1030→  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  1031→  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+  1032→}
+  1033→
+  1034→// Format seconds to human readable
+  1035→export function formatEta(seconds: number): string {
+  1036→  if (seconds <= 0 || !isFinite(seconds)) return '';
+  1037→  if (seconds < 60) return `${Math.round(seconds)}s`;
+  1038→  const m = Math.floor(seconds / 60);
+  1039→  const s = Math.round(seconds % 60);
+  1040→  if (m < 60) return `${m}m ${s}s`;
+  1041→  const h = Math.floor(m / 60);
+  1042→  return `${h}h ${m % 60}m`;
+  1043→}
+  1044→
+  1045→// ── Subtitle utilities ──────────────────────────────────────────────────────
+  1046→
+  1047→/** Parse the last timestamp from a VTT segment to calculate cumulative offset */
+  1048→function parseLastVttTimestamp(vtt: string): number {
+  1049→  // Match both HH:MM:SS.mmm and MM:SS.mmm formats
+  1050→  const matches = vtt.matchAll(/(\d{2}):(\d{2})(?::(\d{2}))?\.(\d{3})/g);
+  1051→  let lastMs = 0;
+  1052→  for (const m of matches) {
+  1053→    const hasHours = m[3] !== undefined;
+  1054→    const h = hasHours ? parseInt(m[1], 10) : 0;
+  1055→    const min = hasHours ? parseInt(m[2], 10) : parseInt(m[1], 10);
+  1056→    const s = hasHours ? parseInt(m[3], 10) : parseInt(m[2], 10);
+  1057→    const ms = parseInt(m[4], 10);
+  1058→    lastMs = Math.max(lastMs, h * 3600000 + min * 60000 + s * 1000 + ms);
+  1059→  }
+  1060→  return lastMs;
+  1061→}
+  1062→
+  1063→/** Adjust all timestamps in a VTT segment by adding an offset in ms */
+  1064→function adjustVttTimestamps(vtt: string, offsetMs: number): string {
+  1065→  // Match both HH:MM:SS.mmm and MM:SS.mmm formats
+  1066→  return vtt.replace(
+  1067→    /(\d{2}):(\d{2})(?::(\d{2}))?\.(\d{3})/g,
+  1068→    (_match, p1, p2, p3, p4) => {
+  1069→      const hasHours = p3 !== undefined;
+  1070→      const h = hasHours ? parseInt(p1, 10) : 0;
+  1071→      const min = hasHours ? parseInt(p2, 10) : parseInt(p1, 10);
+  1072→      const s = hasHours ? parseInt(p3, 10) : parseInt(p2, 10);
+  1073→      const ms = parseInt(p4, 10);
+  1074→      let totalMs = h * 3600000 + min * 60000 + s * 1000 + ms;
+  1075→      totalMs += offsetMs;
+  1076→      const newH = Math.floor(totalMs / 3600000);
+  1077→      totalMs %= 3600000;
+  1078→      const newM = Math.floor(totalMs / 60000);
+  1079→      totalMs %= 60000;
+  1080→      const newS = Math.floor(totalMs / 1000);
+  1081→      const newMs = totalMs % 1000;
+  1082→      // Always output in HH:MM:SS.mmm format for consistency
+  1083→      return `${String(newH).padStart(2, '0')}:${String(newM).padStart(2, '0')}:${String(newS).padStart(2, '0')}.${String(newMs).padStart(3, '0')}`;
+  1084→    }
+  1085→  );
+  1086→}
+  1087→
