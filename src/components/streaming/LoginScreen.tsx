@@ -3,13 +3,128 @@
 import { useState, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
-import { BicepsFlexed, Eye, EyeOff, Loader2, LogIn, MonitorSmartphone } from 'lucide-react';
+import { BicepsFlexed, Eye, EyeOff, Loader2, LogIn, MonitorSmartphone, WifiOff, RefreshCw } from 'lucide-react';
 import RetroShield from './RetroShield';
 import { getMyProfile, getSupabaseConfig } from '@/lib/supabase';
 import { registerSession } from '@/lib/session-manager';
 import { useAuthStore } from '@/store';
 import { createClient } from '@supabase/supabase-js';
 import type { SessionResult } from '@/lib/session-manager';
+
+// ── Error classification ────────────────────────────────────
+// Maps Supabase/network errors to specific, actionable messages.
+// This is the core fix for the "connection lost without evidence" issue.
+
+type AuthErrorKind = 'network' | 'auth' | 'server' | 'timeout' | 'config' | 'unknown';
+
+interface ClassifiedError {
+  kind: AuthErrorKind;
+  message: string;
+  retryable: boolean;
+}
+
+function classifyAuthError(error: unknown): ClassifiedError {
+  // Supabase AuthError
+  if (error && typeof error === 'object' && 'message' in error) {
+    const msg = String((error as { message: unknown }).message).toLowerCase();
+
+    // Network / connection errors
+    if (
+      msg.includes('connection') ||
+      msg.includes('network') ||
+      msg.includes('fetch') ||
+      msg.includes('failed to fetch') ||
+      msg.includes('net::') ||
+      msg.includes('err_connection') ||
+      msg.includes('err_name_not_resolved') ||
+      msg.includes('err_timed_out') ||
+      msg.includes('unable to reach') ||
+      msg.includes('request timed out') ||
+      msg.includes('timeout')
+    ) {
+      console.warn('[AUTH] signIn error classified as NETWORK:', msg);
+      return {
+        kind: 'network',
+        message: navigator.onLine
+          ? 'Cannot reach the server. Try again in a moment.'
+          : 'No internet connection. Check your network and try again.',
+        retryable: true,
+      };
+    }
+
+    // Auth-specific errors
+    if (msg.includes('invalid login')) {
+      return { kind: 'auth', message: 'Invalid email or password', retryable: false };
+    }
+    if (msg.includes('email not confirmed')) {
+      return { kind: 'auth', message: 'Account not yet activated. Contact admin.', retryable: false };
+    }
+    if (msg.includes('too many requests') || msg.includes('rate limit')) {
+      console.warn('[AUTH] signIn error classified as SERVER (rate limit):', msg);
+      return { kind: 'server', message: 'Too many attempts. Wait a minute and try again.', retryable: true };
+    }
+    if (msg.includes('invalid api key') || msg.includes('jwt')) {
+      console.warn('[AUTH] signIn error classified as CONFIG:', msg);
+      return { kind: 'config', message: 'Server configuration error. Please contact support.', retryable: false };
+    }
+
+    // Generic Supabase error — likely server-side
+    if (msg.includes('500') || msg.includes('internal') || msg.includes('unexpected')) {
+      console.warn('[AUTH] signIn error classified as SERVER:', msg);
+      return { kind: 'server', message: 'Server error. Please try again shortly.', retryable: true };
+    }
+
+    // Other Supabase errors
+    console.warn('[AUTH] signIn error unclassified:', msg);
+    return { kind: 'unknown', message: String((error as { message: unknown }).message), retryable: false };
+  }
+
+  // Non-Error throws (string, number, etc.)
+  if (error instanceof TypeError && error.message.includes('fetch')) {
+    console.warn('[AUTH] signIn TypeError (fetch):', error.message);
+    return {
+      kind: 'network',
+      message: navigator.onLine
+        ? 'Cannot reach the server. Try again in a moment.'
+        : 'No internet connection. Check your network and try again.',
+      retryable: true,
+    };
+  }
+
+  console.warn('[AUTH] signIn unknown error:', error);
+  return { kind: 'unknown', message: 'Sign in failed. Please try again.', retryable: false };
+}
+
+// ── Network readiness check ─────────────────────────────────
+// After a device wakes from sleep, the network interface may
+// not be fully ready even though navigator.onLine is true.
+// This performs a lightweight connectivity probe to the Supabase
+// health endpoint before attempting auth.
+
+async function waitForNetworkReady(maxWaitMs = 5000): Promise<boolean> {
+  if (!navigator.onLine) return false;
+
+  // Quick check: try a lightweight fetch to verify DNS + TCP are ready.
+  // Use the Supabase URL as the target since that's where auth calls go.
+  const config = getSupabaseConfig();
+  if (!config.url) return navigator.onLine;
+
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      // HEAD request to Supabase root — lightweight, no auth needed
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2000);
+      await fetch(config.url, { method: 'HEAD', mode: 'no-cors', signal: controller.signal });
+      clearTimeout(timeout);
+      return true; // Network is ready
+    } catch {
+      // Network not ready yet — wait 300ms and retry
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+  return false; // Timed out
+}
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -20,6 +135,8 @@ export default function LoginScreen() {
   const [passwordError, setPasswordError] = useState('');
   const [sessionRejection, setSessionRejection] = useState<SessionResult | null>(null);
   const lastAuthRef = useRef<{ user: any; session: any } | null>(null);
+  const retryCountRef = useRef(0);
+  const MAX_RETRIES = 2;
 
   const setAuth = useAuthStore((s) => s.setAuth);
   const setProfile = useAuthStore((s) => s.setProfile);
@@ -47,10 +164,28 @@ export default function LoginScreen() {
     // spinning button with no way to recover except force-closing the app.
     const timeoutId = setTimeout(() => {
       setIsLoading(false);
+      retryCountRef.current = 0;
       setEmailError('Sign in timed out. Check your connection and try again.');
     }, 15_000);
 
     try {
+      // ── Network readiness check ────────────────────────────
+      // After device wake, DNS and TCP may not be ready even though
+      // navigator.onLine is true. Probe the network first to avoid
+      // the "connection lost" error that requires PWA reinstall.
+      if (navigator.onLine) {
+        const ready = await waitForNetworkReady(3000);
+        if (!ready && !navigator.onLine) {
+          setEmailError('No internet connection. Check your network and try again.');
+          return;
+        }
+        // If probe timed out but navigator.onLine is still true,
+        // proceed anyway — the auth call itself may succeed.
+      } else {
+        setEmailError('No internet connection. Check your network and try again.');
+        return;
+      }
+
       // Use a FRESH client for signIn, not the singleton.
       // The singleton's GoTrue client can hang indefinitely after page reload
       // (re-initialization race when initSupabase() resets _client).
@@ -63,6 +198,11 @@ export default function LoginScreen() {
       // CRITICAL: use the same storageKey so the session is written to
       // the same localStorage key that getAuthToken() reads from.
       const signInConfig = getSupabaseConfig();
+      if (!signInConfig.url || !signInConfig.key) {
+        setEmailError('App not configured. Please reload the page.');
+        return;
+      }
+
       const signInClient = createClient(
         signInConfig.url,
         signInConfig.key,
@@ -74,15 +214,40 @@ export default function LoginScreen() {
       });
 
       if (error) {
-        if (error.message.includes('Invalid login')) {
-          setPasswordError('Invalid email or password');
-        } else if (error.message.includes('Email not confirmed')) {
-          setEmailError('Account not yet activated. Contact admin.');
+        const classified = classifyAuthError(error);
+
+        if (classified.kind === 'auth') {
+          // Auth errors go to password field
+          setPasswordError(classified.message);
         } else {
-          setEmailError(error.message);
+          // All other errors go to email field (top of form)
+          setEmailError(classified.message);
         }
+
+        // Auto-retry for retryable errors (network, server)
+        if (classified.retryable && retryCountRef.current < MAX_RETRIES) {
+          retryCountRef.current++;
+          // Wait with exponential backoff before retrying
+          const backoffMs = 1000 * Math.pow(2, retryCountRef.current - 1);
+          await new Promise((r) => setTimeout(r, backoffMs));
+          // Recursive call — the timeout guard above still applies
+          clearTimeout(timeoutId);
+          setIsLoading(false);
+          handleLogin();
+          return;
+        }
+
+        // Non-retryable or max retries reached
+        if (classified.retryable && retryCountRef.current >= MAX_RETRIES) {
+          setEmailError((prev) => prev + ' (tried ' + (retryCountRef.current + 1) + ' times)');
+        }
+
+        retryCountRef.current = 0;
         return;
       }
+
+      // Auth successful — reset retry counter
+      retryCountRef.current = 0;
 
       // Auth successful — set user/session in store
       setAuth(data.user, data.session);
@@ -113,9 +278,15 @@ export default function LoginScreen() {
             profile = { ...profileData, is_complete: profileData.display_name.trim().length > 0 };
           }
         }
-      } catch {
+      } catch (profileErr) {
         // Profile fetch failed — non-critical. If metaCompleted is true
         // the user still gets in. If not, they'll see needs_profile.
+        // Log for diagnostics but don't block login.
+        const classified = classifyAuthError(profileErr);
+        if (classified.kind === 'network') {
+          // Network issue during profile fetch — still allow login
+          // The profile will be re-fetched on next heartbeat/online event
+        }
       }
       setProfile(profile);
 
@@ -144,7 +315,30 @@ export default function LoginScreen() {
         setStatus('needs_profile');
       }
     } catch (err) {
-      setEmailError('Sign in failed. Please try again.');
+      const classified = classifyAuthError(err);
+
+      if (classified.kind === 'auth') {
+        setPasswordError(classified.message);
+      } else {
+        setEmailError(classified.message);
+      }
+
+      // Auto-retry for transient errors
+      if (classified.retryable && retryCountRef.current < MAX_RETRIES) {
+        retryCountRef.current++;
+        const backoffMs = 1000 * Math.pow(2, retryCountRef.current - 1);
+        await new Promise((r) => setTimeout(r, backoffMs));
+        clearTimeout(timeoutId);
+        setIsLoading(false);
+        handleLogin();
+        return;
+      }
+
+      if (classified.retryable && retryCountRef.current >= MAX_RETRIES) {
+        setEmailError((prev) => prev ? prev + ' (retry failed)' : classified.message + ' (retry failed)');
+      }
+
+      retryCountRef.current = 0;
     } finally {
       clearTimeout(timeoutId);
       setIsLoading(false);
@@ -155,6 +349,11 @@ export default function LoginScreen() {
     if (!lastAuthRef.current) return;
     setIsLoading(true);
     try {
+      // Network readiness check before force login too
+      if (navigator.onLine) {
+        await waitForNetworkReady(3000);
+      }
+
       const result = await registerSession(true, lastAuthRef.current.session.access_token);
       if (result?.active) {
         setSessionRejection(null);
@@ -190,10 +389,16 @@ export default function LoginScreen() {
           setStatus('needs_profile');
         }
       } else {
-        toast.error('Could not sign out other devices. Try again.');
+        const classified = classifyAuthError(result);
+        toast.error(classified.kind === 'network'
+          ? 'Cannot reach the server. Check your connection.'
+          : 'Could not sign out other devices. Try again.');
       }
-    } catch {
-      toast.error('Connection error. Check your internet.');
+    } catch (err) {
+      const classified = classifyAuthError(err);
+      toast.error(classified.kind === 'network'
+        ? 'No internet connection. Check your network.'
+        : classified.message);
     } finally {
       setIsLoading(false);
     }
@@ -324,7 +529,7 @@ export default function LoginScreen() {
             ) : (
               <LogIn className="size-5" />
             )}
-            {isLoading ? 'Signing in...' : 'Sign In'}
+            {isLoading ? (retryCountRef.current > 0 ? 'Retrying...' : 'Signing in...') : 'Sign In'}
           </button>
         </div>
 

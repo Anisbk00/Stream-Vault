@@ -390,6 +390,46 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         if (!accessToken || typeof accessToken !== 'string') {
           set({ status: 'unauthenticated' }); return;
         }
+
+        // ── Validate JWT expiry ──────────────────────────────────────
+        // After long PWA inactivity, the access_token JWT may be expired.
+        // GoTrue auto-refresh only works while the JS runtime is alive.
+        // If the PWA was backgrounded/killed for days, the token expired
+        // but GoTrue never refreshed it. Setting 'authenticated' on an
+        // expired token causes immediate logout when getSession() validates
+        // server-side, plus a broken state where the user sees the app
+        // briefly then gets kicked out.
+        //
+        // If the token is expired but a refresh_token exists, stay at
+        // 'loading' so the auth validation effect can attempt a refresh.
+        // If no refresh_token, go straight to unauthenticated.
+        try {
+          const payloadB64 = accessToken.split('.')[1];
+          if (payloadB64) {
+            const payload = JSON.parse(atob(payloadB64));
+            const expMs = payload.exp * 1000;
+            const isExpired = Date.now() >= expMs;
+            if (isExpired) {
+              const refreshToken = session?.refresh_token;
+              if (refreshToken && typeof refreshToken === 'string') {
+                // Token expired but refresh token might still be valid.
+                // Stay at 'loading' so the auth effect can attempt refresh.
+                // This prevents the flash-of-authenticated-then-kicked-out.
+                console.warn('[AUTH] bootstrapFromCache: JWT expired, refresh_token exists → staying at loading for refresh attempt');
+                const cached = getCachedProfile();
+                set({ status: 'loading', profile: cached, isOffline: !navigator.onLine });
+                return;
+              }
+              // No refresh token → session is irrecoverable
+              console.warn('[AUTH] bootstrapFromCache: JWT expired, no refresh_token → unauthenticated');
+              set({ status: 'unauthenticated' });
+              return;
+            }
+          }
+        } catch {
+          // JWT decode failed — don't block, let validation effect handle it
+        }
+
         // Validate user_metadata is an object (not null/undefined/corrupted)
         const userMeta = session?.user?.user_metadata;
         const metaCompleted = !!(userMeta && typeof userMeta === 'object' && userMeta.profile_completed);

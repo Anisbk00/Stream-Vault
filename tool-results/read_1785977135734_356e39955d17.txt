@@ -1,0 +1,1523 @@
+     1→'use client';
+     2→
+     3→import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+     4→import { AnimatePresence, motion } from 'framer-motion';
+     5→import { toast } from 'sonner';
+     6→import { WifiOff } from 'lucide-react';
+     7→import SplashScreen from '@/components/streaming/SplashScreen';
+     8→import { useNavigationStore, useWatchlistStore, useUIStore, useDownloadStore, useProgressStore, useAuthStore } from '@/store';
+     9→import type { ContentItem } from '@/types/streaming';
+    10→import type { DownloadTask } from '@/lib/hls-downloader';
+    11→import {
+    12→  fetchStreamSources,
+    13→  fetchContentDetail,
+    14→  fetchTrending,
+    15→  fetchPopular,
+    16→  fetchGenres,
+    17→} from '@/services/api';
+    18→import { supabase, getMyProfile, initSupabase, touchProfile } from '@/lib/supabase';
+    19→import { startHeartbeat, stopHeartbeat, registerSession, heartbeatSession, getAuthToken } from '@/lib/session-manager';
+    20→import { unregisterPlayback as unregisterPlaybackSync } from '@/lib/hls-memory-loader';
+    21→import { getCachedProfile } from '@/store';
+    22→
+    23→// Layout
+    24→import Navbar from '@/components/streaming/Navbar';
+    25→import MobileNav from '@/components/streaming/MobileNav';
+    26→import SearchOverlay from '@/components/streaming/SearchOverlay';
+    27→
+    28→// Pages
+    29→import HomePage from '@/components/streaming/HomePage';
+    30→import BrowsePage from '@/components/streaming/BrowsePage';
+    31→import WatchlistPage from '@/components/streaming/WatchlistPage';
+    32→import DetailPage from '@/components/streaming/DetailPage';
+    33→import VideoPlayer from '@/components/streaming/VideoPlayer';
+    34→import DownloadPanel from '@/components/streaming/DownloadPanel';
+    35→import ProfilePage from '@/components/streaming/ProfilePage';
+    36→import DownloadsPage from '@/components/streaming/DownloadsPage';
+    37→
+    38→// Auth screens
+    39→import LoginScreen from '@/components/streaming/LoginScreen';
+    40→import ProfileCompletionScreen from '@/components/streaming/ProfileCompletionScreen';
+    41→
+    42→// Watch Party
+    43→import WatchPartyInviteOverlay from '@/components/streaming/WatchPartyInviteOverlay';
+    44→import WatchPartyRoom from '@/components/streaming/WatchPartyRoom';
+    45→import WatchPartyContentPicker from '@/components/streaming/WatchPartyContentPicker';
+    46→import { useWatchParty } from '@/hooks/use-watch-party';
+    47→import { useWatchPartyStore } from '@/store/watch-party';
+    48→import type { WatchPartyInvitation } from '@/lib/watch-party-types';
+    49→
+    50→/* ── iOS-style animation constants ────────────────────────── */
+    51→// Apple's signature spring: snappy with natural deceleration
+    52→const iosSpring = { type: 'spring' as const, damping: 28, stiffness: 320, mass: 0.9 };
+    53→const iosTransition = { duration: 0.35, ease: [0.32, 0.72, 0, 1] as const };
+    54→const iosSpringTransition = { ...iosSpring };
+    55→
+    56→// Tab-level page transitions (crossfade with subtle scale)
+    57→const pageVariants = {
+    58→  initial: (direction: string) => ({
+    59→    opacity: 0,
+    60→    x: direction === 'forward' ? 20 : direction === 'back' ? -20 : 0,
+    61→    scale: 0.98,
+    62→  }),
+    63→  animate: {
+    64→    opacity: 1,
+    65→    x: 0,
+    66→    scale: 1,
+    67→  },
+    68→  exit: (direction: string) => ({
+    69→    opacity: 0,
+    70→    x: direction === 'forward' ? -20 : direction === 'back' ? 20 : 0,
+    71→    scale: 0.98,
+    72→  }),
+    73→};
+    74→
+    75→// Detail page: push from right (forward) / slide back left (backward)
+    76→const detailPageVariants = {
+    77→  initial: (direction: string) => ({
+    78→    opacity: 0,
+    79→    x: direction === 'forward' ? 60 : -40,
+    80→    scale: 0.96,
+    81→    filter: 'blur(4px)',
+    82→  }),
+    83→  animate: {
+    84→    opacity: 1,
+    85→    x: 0,
+    86→    scale: 1,
+    87→    filter: 'blur(0px)',
+    88→  },
+    89→  exit: (direction: string) => ({
+    90→    opacity: 0,
+    91→    x: direction === 'forward' ? -40 : 60,
+    92→    scale: 0.96,
+    93→    filter: 'blur(4px)',
+    94→  }),
+    95→};
+    96→
+    97→// Module-level throttle state for navigation heartbeat (survives renders, not page reloads)
+    98→let _lastNavHeartbeat = 0;
+    99→const NAV_HEARTBEAT_THROTTLE_MS = 30_000;
+   100→
+   101→interface MoveraAppProps {
+   102→  supabaseUrl: string;
+   103→  supabaseAnonKey: string;
+   104→}
+   105→
+   106→export default function MoveraApp({ supabaseUrl, supabaseAnonKey }: MoveraAppProps) {
+   107→  const currentPage = useNavigationStore((s) => s.currentPage);
+   108→  const selectedContentId = useNavigationStore((s) => s.selectedContentId);
+   109→  const selectedMediaType = useNavigationStore((s) => s.selectedMediaType);
+   110→  const navDirection = useNavigationStore((s) => s.direction);
+   111→  const navigate = useNavigationStore((s) => s.navigate);
+   112→  const goBack = useNavigationStore((s) => s.goBack);
+   113→  const navigatedFromSearch = useNavigationStore((s) => s.navigatedFromSearch);
+   114→  const setNavigatedFromSearch = useNavigationStore((s) => s.setNavigatedFromSearch);
+   115→
+   116→  const status = useAuthStore((s) => s.status);
+   117→  const setAuth = useAuthStore((s) => s.setAuth);
+   118→  const setProfile = useAuthStore((s) => s.setProfile);
+   119→  const setStatus = useAuthStore((s) => s.setStatus);
+   120→  const setOffline = useAuthStore((s) => s.setOffline);
+   121→  const bootstrapFromCache = useAuthStore((s) => s.bootstrapFromCache);
+   122→  const isOffline = useAuthStore((s) => s.isOffline);
+   123→  const fetchWatchlistFromServer = useWatchlistStore((s) => s.fetchFromServer);
+   124→  const syncWatchlistFromServer = useWatchlistStore((s) => s.syncFromServer);
+   125→  const watchlistItems = useWatchlistStore((s) => s.items);
+   126→  const toggleWatchlist = useWatchlistStore((s) => s.toggleItem);
+   127→  const removeWatchlist = useWatchlistStore((s) => s.removeItem);
+   128→  const isSearchOpen = useUIStore((s) => s.isSearchOpen);
+   129→  const setSearchOpen = useUIStore((s) => s.setSearchOpen);
+   130→  const savedSearchQuery = useUIStore((s) => s.savedSearchQuery);
+   131→  const savedSearchResults = useUIStore((s) => s.savedSearchResults);
+   132→  const savedSearchFilters = useUIStore((s) => s.savedSearchFilters);
+   133→  const saveSearchState = useUIStore((s) => s.saveSearchState);
+   134→  const clearSavedSearch = useUIStore((s) => s.clearSavedSearch);
+   135→  const isDownloadPanelOpen = useUIStore((s) => s.isDownloadPanelOpen);
+   136→  const setDownloadPanelOpen = useUIStore((s) => s.setDownloadPanelOpen);
+   137→  const removeDownload = useDownloadStore((s) => s.removeTask);
+   138→  const updateProgress = useProgressStore((s) => s.updateProgress);
+   139→
+   140→  // ── Watch Party ───────────────────────────────────────────
+   141→  const wpSocket = useWatchParty();
+   142→  const isInParty = useWatchPartyStore((s) => s.isInParty);
+   143→  const isHost = useWatchPartyStore((s) => s.isHost);
+   144→  const currentParty = useWatchPartyStore((s) => s.currentParty);
+   145→  const isPttActive = useWatchPartyStore((s) => s.isPttActive);
+   146→  const talkingMembers = useWatchPartyStore((s) => s.talkingMembers);
+   147→  const pauseNotification = useWatchPartyStore((s) => s.pauseNotification);
+   148→  const [wpContentPickerOpen, setWpContentPickerOpen] = useState(false);
+   149→
+   150→  // Track whether the host explicitly closed the player while in a party.
+   151→  // Prevents the auto-play effect from immediately reopening the player
+   152→  // when the host closes it to change content. Reset when host opens player again.
+   153→  const hostClosedPlayerRef = useRef(false);
+   154→
+   155→  // ── Initialize Supabase with Server Component props ─────
+   156→  // These props come from the Server Component page.tsx which
+   157→  // reads process.env at REQUEST TIME on Vercel (not build time).
+   158→  // This is the ONLY reliable way to get correct credentials.
+   159→  const [splashDone, setSplashDone] = useState(false);
+   160→  const configReady = !!(supabaseUrl && supabaseAnonKey && supabaseAnonKey.length > 10);
+   161→
+   162→  useEffect(() => {
+   163→    if (supabaseUrl && supabaseAnonKey) {
+   164→      initSupabase(supabaseUrl, supabaseAnonKey);
+   165→    }
+   166→  }, [supabaseUrl, supabaseAnonKey]);
+   167→
+   168→  // ── Pre-fetch data during splash (non-blocking) ────────
+   169→  useEffect(() => {
+   170→    if (splashDone) return;
+   171→    const controller = new AbortController();
+   172→    const signal = controller.signal;
+   173→
+   174→    // Fire-and-forget: prefetch trending, popular, genres for instant page loads
+   175→    Promise.allSettled([
+   176→      fetchTrending(1, 'all', signal).catch(() => []),
+   177→      fetchPopular(1, 'movie', signal).catch(() => []),
+   178→      fetchPopular(1, 'tv', signal).catch(() => []),
+   179→      fetchGenres('movie', signal).catch(() => []),
+   180→      fetchGenres('tv', signal).catch(() => []),
+   181→    ]);
+   182→
+   183→    return () => controller.abort();
+   184→  }, [splashDone]);
+   185→
+   186→  // ── Bootstrap from localStorage cache (post-hydration) ────
+   187→  useEffect(() => {
+   188→    bootstrapFromCache();
+   189→  }, [bootstrapFromCache]);
+   190→
+   191→  // ── Cleanup stale download tasks after persist rehydration ────
+   192→  // If the app was closed/killed during a download, the task stays as
+   193→  // 'downloading'/'pending' in persisted store but the JS execution is dead.
+   194→  // Reset them to 'error' so the user can retry.
+   195→  // CRITICAL: Must run AFTER persist rehydration — otherwise the store is
+   196→  // empty (before rehydration) and stale tasks from localStorage go unnoticed.
+   197→  useEffect(() => {
+   198→    const doCleanup = () => {
+   199→      import('@/lib/download-service').then(({ cleanupStaleTasks }) => {
+   200→        cleanupStaleTasks();
+   201→      });
+   202→    };
+   203→    // Zustand persist exposes onFinishHydration — fires once after rehydration
+   204→    const unsub = useDownloadStore.persist.onFinishHydration(doCleanup);
+   205→    // If rehydration already completed (edge case), run immediately
+   206→    if (useDownloadStore.persist.hasHydrated()) {
+   207→      doCleanup();
+   208→    }
+   209→    return unsub;
+   210→  }, []);
+   211→
+   212→  // ── Block popup windows from embed players ────────────────────
+   213→  useEffect(() => {
+   214→    const originalOpen = window.open;
+   215→    window.open = function (...args) {
+   216→      // Block popup windows (ads). Only allow if it's from our own domain.
+   217→      const url = args[0]?.toString() || '';
+   218→      if (url && (url.startsWith('/') || url.includes(window.location.hostname))) {
+   219→        return originalOpen.apply(window, args);
+   220→      }
+   221→      return null;
+   222→    };
+   223→    return () => {
+   224→      window.open = originalOpen;
+   225→    };
+   226→  }, []);
+   227→
+   228→  // ── Dismiss splash once auth resolves ──────────────────────
+   229→  useEffect(() => {
+   230→    if (status !== 'loading') {
+   231→      // Let the splash animation fully play before cross-fading to app.
+   232→      // Dismiss even when config is missing — the login screen will show
+   233→      // a "configuration required" state instead of a permanent splash.
+   234→      const timer = setTimeout(() => setSplashDone(true), 2200);
+   235→      return () => clearTimeout(timer);
+   236→    }
+   237→  }, [status]);
+   238→
+   239→  // ── Safety net: force exit loading state after 6 seconds ───
+   240→  useEffect(() => {
+   241→    const timer = setTimeout(() => {
+   242→      if (useAuthStore.getState().status === 'loading') {
+   243→        // DO NOT force-authenticate from cached token without validation.
+   244→        // The auth effect (validateSession) handles token validation.
+   245→        // If it's still loading after 6s, something is genuinely stuck —
+   246→        // fall through to unauthenticated rather than granting unvalidated access.
+   247→        setStatus('unauthenticated');
+   248→      }
+   249→    }, 6000);
+   250→    return () => clearTimeout(timer);
+   251→  }, [setStatus]);
+   252→
+   253→  // ── Auth: validate session with Supabase ──────────────────
+   254→  // Only runs after config is ready (dependency on configReady).
+   255→  useEffect(() => {
+   256→    if (!configReady) return;
+   257→
+   258→    let mounted = true;
+   259→    let subscription: { unsubscribe: () => void } | null = null;
+   260→
+   261→    async function init() {
+   262→      // Set up auth subscription
+   263→      subscription = supabase.auth.onAuthStateChange(
+   264→        async (_event, session) => {
+   265→          if (!mounted) return;
+   266→
+   267→          // ── Null session: NEVER clear state from this handler ──
+   268→          // signOut() fires SIGNED_OUT asynchronously (queued by GoTrue).
+   269→          // A delayed SIGNED_OUT from a previous signOut can arrive AFTER
+   270→          // a new signInWithPassword() + setStatus('authenticated'), wiping
+   271→          // the fresh session. The previous status guard couldn't prevent
+   272→          // this because status IS 'authenticated' at that point.
+   273→          //
+   274→          // Instead, this handler ONLY syncs state when a valid session
+   275→          // exists. Null-session events are handled by:
+   276→          // - logout() — clears state directly before calling signOut.
+   277→          // - 10s heartbeat — detects session eviction server-side.
+   278→          // - GoTrue's auto-refresh — handles token renewal internally.
+   279→          if (!session) return;
+   280→
+   281→          // ── Not authenticated: LoginScreen handles sign-in directly ──
+   282→          // Don't process SIGNED_IN/TOKEN_REFRESHED during login — the
+   283→          // login handler sets auth state directly via setAuth + setStatus.
+   284→          if (useAuthStore.getState().status !== 'authenticated') return;
+   285→
+   286→          // ── Offline: don't trigger profile fetch when offline ──
+   287→          if (!navigator.onLine) return;
+   288→
+   289→          try {
+   290→            // Session refreshed or user updated — re-sync auth + profile
+   291→            setAuth(session.user, session);
+   292→            const profile = await getMyProfile();
+   293→            if (profile) setProfile(profile);
+   294→          } catch {
+   295→            // Non-critical: transient error (network blip, Supabase hiccup).
+   296→            // The next heartbeat or online event will retry profile sync.
+   297→          }
+   298→        },
+   299→      ).data.subscription;
+   300→
+   301→      // Validate session
+   302→      try {
+   303→        const { data: { session } } = await supabase.auth.getSession();
+   304→
+   305→        if (!session) {
+   306→          // OFFLINE RECOVERY: getSession() may return null when Supabase cleared
+   307→          // the stored session during a failed token refresh. If we're offline
+   308→          // and have a cached session in localStorage, recover from it instead
+   309→          // of wiping the auth state.
+   310→          if (!navigator.onLine) {
+   311→            try {
+   312→              const raw = localStorage.getItem('movera-auth-token');
+   313→              if (raw) {
+   314→                const cached = JSON.parse(raw);
+   315→                if (cached?.access_token) {
+   316→                  // Keep the authenticated state from bootstrapFromCache
+   317→                  return;
+   318→                }
+   319→              }
+   320→            } catch { /* ignore parse errors */ }
+   321→          }
+   322→          if (mounted) {
+   323→            setProfile(null);
+   324→            setStatus('unauthenticated');
+   325→          }
+   326→          return;
+   327→        }
+   328→
+   329→        if (mounted) setAuth(session.user, session);
+   330→
+   331→        const metaCompleted = !!session.user.user_metadata?.profile_completed;
+   332→        const profile = await getMyProfile();
+   333→        if (!mounted) return;
+   334→
+   335→        setProfile(profile);
+   336→
+   337→        if (metaCompleted || (profile && profile.display_name.trim().length > 0)) {
+   338→          setStatus('authenticated');
+   339→          if (session.access_token) {
+   340→            fetchWatchlistFromServer(session.access_token);
+   341→            // Bump updated_at to signal user activity (throttled to 1h)
+   342→            touchProfile(profile?.updated_at);
+   343→          }
+   344→        } else {
+   345→          setStatus('needs_profile');
+   346→        }
+   347→      } catch {
+   348→        if (mounted) {
+   349→          const current = useAuthStore.getState().status;
+   350→          // OFFLINE RECOVERY: bootstrapFromCache() already set status to
+   351→          // 'authenticated'. Don't overwrite it with 'unauthenticated' just
+   352→          // because getMyProfile() failed (expected when offline).
+   353→          if (current === 'loading') {
+   354→            const cached = getCachedProfile();
+   355→            if (cached && cached.display_name.trim().length > 0) {
+   356→              setProfile(cached);
+   357→              setStatus('authenticated');
+   358→              // Only mark offline if actually offline — getMyProfile() can
+   359→              // fail for non-offline reasons (RLS, Supabase hiccup, etc.)
+   360→              if (!navigator.onLine) setOffline(true);
+   361→            } else {
+   362→              setStatus('unauthenticated');
+   363→            }
+   364→          } else if (current === 'authenticated') {
+   365→            // Already recovered by bootstrap — only mark offline if actually offline
+   366→            if (!navigator.onLine) setOffline(true);
+   367→          }
+   368→        }
+   369→      }
+   370→    }
+   371→
+   372→    init();
+   373→
+   374→    return () => {
+   375→      mounted = false;
+   376→      if (subscription) subscription.unsubscribe();
+   377→    };
+   378→  }, [configReady, setAuth, setProfile, setStatus, setOffline, fetchWatchlistFromServer]);
+   379→
+   380→  // ── Online/offline listeners ─────────────────────────────
+   381→  useEffect(() => {
+   382→    const goOffline = () => setOffline(true);
+   383→    const goOnline = () => {
+   384→      setOffline(false);
+   385→      supabase.auth.getSession().then(async ({ data: { session } }) => {
+   386→        if (!session) return;
+   387→        try {
+   388→          const profile = await getMyProfile();
+   389→          if (profile) setProfile(profile);
+   390→        } catch { /* will retry on next online event */ }
+   391→      });
+   392→    };
+   393→
+   394→    window.addEventListener('online', goOnline);
+   395→    window.addEventListener('offline', goOffline);
+   396→    return () => {
+   397→      window.removeEventListener('online', goOnline);
+   398→      window.removeEventListener('offline', goOffline);
+   399→    };
+   400→  }, [setOffline, setProfile]);
+   401→
+   402→  // ── Session heartbeat & eviction detection ─────────────────
+   403→  // Starts when authenticated, stops on logout/unmount.
+   404→  // If the heartbeat detects the session was evicted (user logged in
+   405→  // on a 3rd device → oldest session killed), force sign-out.
+   406→  useEffect(() => {
+   407→    if (status !== 'authenticated') {
+   408→      stopHeartbeat();
+   409→      return;
+   410→    }
+   411→
+   412→    // Register session on first authenticated mount (existing session from
+   413→    // another device that was already running — ensures heartbeat works).
+   414→    // Only sign out on hard rejection (rejected: true + active: false).
+   415→    // Null (network error) or tracked: false → allow (fail-open).
+   416→    registerSession().then((result) => {
+   417→      if (result?.rejected && !result.active) {
+   418→        toast.error(result.reason || 'Too many active devices. Sign out from another device first.', {
+   419→          duration: 6000,
+   420→        });
+   421→        useAuthStore.getState().logout();
+   422→      }
+   423→    });
+   424→
+   425→    const handleEvicted = () => {
+   426→      // Session was evicted by a newer login on another device
+   427→      toast.error('You have been signed out because your account is being used on another device.', {
+   428→        duration: 6000,
+   429→      });
+   430→      useAuthStore.getState().logout();
+   431→    };
+   432→
+   433→    const cleanup = startHeartbeat(handleEvicted);
+   434→
+   435→    return cleanup;
+   436→  }, [status]);
+   437→
+   438→  // ── Re-open search overlay when going back from detail (search restore) ──
+   439→  // NOTE: Do NOT clear navigatedFromSearch here. It must stay true until
+   440→  // SearchOverlay consumes the restore data (via onRestoreConsumed callback).
+   441→  // Clearing it in this effect creates a race: the prop `restoreQuery` is
+   442→  // computed from navigatedFromSearch, so clearing it here makes restoreQuery
+   443→  // undefined by the time SearchOverlay's isOpen effect runs → no restore.
+   444→  useEffect(() => {
+   445→    if (navigatedFromSearch && currentPage !== 'detail' && !isSearchOpen && savedSearchQuery) {
+   446→      setSearchOpen(true);
+   447→    }
+   448→  }, [navigatedFromSearch, currentPage, isSearchOpen, savedSearchQuery, setSearchOpen]);
+   449→
+   450→  // ── Destroy session on logout ──────────────────────────────
+   451→  // Note: destroySession() is called inside logout() in the auth store,
+   452→  // BEFORE supabase.auth.signOut() destroys the token. This effect is
+   453→  // intentionally empty — kept as a marker so future developers know
+   454→  // where session cleanup happens.
+   455→  useEffect(() => {
+   456→    if (status === 'unauthenticated') {
+   457→      // Session already destroyed by store.logout() before token was cleared
+   458→    }
+   459→  }, [status]);
+   460→
+   461→  // Video player state
+   462→  const [playerState, setPlayerState] = useState<{
+   463→    isOpen: boolean;
+   464→    src: string;
+   465→    fallbackUrls: string[];
+   466→    title: string;
+   467→    poster?: string;
+   468→    contentId?: string | number;
+   469→    mediaType?: 'movie' | 'tv';
+   470→    season?: number;
+   471→    episode?: number;
+   472→    startTime?: number;
+   473→    /** Downloaded subtitle VTT blob URLs, keyed by language */
+   474→    subtitleUrls?: Record<string, string>;
+   475→    /** Subtitle track metadata for UI display */
+   476→    subtitleTracks?: { language: string; name: string; isDefault: boolean }[];
+   477→    /** Force HLS.js playback (for downloaded HLS content played via fake m3u8) */
+   478→    useHls?: boolean;
+   479→    /** ID for in-memory segment data (custom HLS.js loader) */
+   480→    hlsPlaybackId?: string;
+   481→    /** fMP4 blob for MSE-based playback (downloaded HLS remuxed to MP4) */
+   482→    fmp4Blob?: Blob;
+   483→  }>({
+   484→    isOpen: false,
+   485→    src: '',
+   486→    fallbackUrls: [],
+   487→    title: '',
+   488→  });
+   489→
+   490→  const [playedItem, setPlayedItem] = useState<ContentItem | null>(null);
+   491→  const mainRef = useRef<HTMLElement>(null);
+   492→
+   493→  // AbortController to cancel stale stream source fetches (prevents wrong content
+   494→  // from opening when user rapidly taps play on different items)
+   495→  const sourceFetchControllerRef = useRef<AbortController | null>(null);
+   496→
+   497→  // Track blob URLs created for downloaded content playback — must be revoked on
+   498→  // player close to prevent memory leaks (video blobs can be 100MB+)
+   499→  const playbackBlobUrlsRef = useRef<string[]>([]);
+   500→
+   501→  // Track current hlsPlaybackId in a ref so handleClosePlayer can read it
+   502→  // without depending on playerState.hlsPlaybackId (avoids callback recreation
+   503→  // and race conditions with async import() during close)
+   504→  const hlsPlaybackIdRef = useRef<string | null>(null);
+   505→
+   506→  // Scroll main content to top on page change
+   507→  useEffect(() => {
+   508→    mainRef.current?.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+   509→  }, [currentPage]);
+   510→
+   511→  // Sync watchlist from server when navigating to mylist page
+   512→  useEffect(() => {
+   513→    if (currentPage === 'mylist' && status === 'authenticated') {
+   514→      syncWatchlistFromServer();
+   515→    }
+   516→  }, [currentPage, status, syncWatchlistFromServer]);
+   517→
+   518→  const handleNavigate = useCallback(
+   519→    (page: string, id?: string | number) => {
+   520→      // Throttled session validity check on navigation (max once per 30 seconds).
+   521→      // The periodic 10-second heartbeat handles real-time session monitoring.
+   522→      // This navigation check catches edge cases (user away > 10s, then navigates).
+   523→      const now = Date.now();
+   524→      if (now - _lastNavHeartbeat > NAV_HEARTBEAT_THROTTLE_MS) {
+   525→        _lastNavHeartbeat = now;
+   526→        heartbeatSession().then(async (result) => {
+   527→          if (result && !result.active) {
+   528→            // Session not found on server (stale purge or eviction).
+   529→            // Try to re-register before force-logging out.
+   530→            const token = await getAuthToken();
+   531→            if (token) {
+   532→              const reReg = await registerSession(false, token);
+   533→              if (reReg?.active) return; // Successfully re-registered — no action needed
+   534→              if (reReg?.rejected) {
+   535→                // Max devices reached — log out
+   536→                toast.error('You have been signed out because your account is being used on another device.', {
+   537→                  duration: 6000,
+   538→                });
+   539→                useAuthStore.getState().logout();
+   540→                return;
+   541→              }
+   542→            }
+   543→            // Re-registration failed (network error, etc.) — only evict if explicitly evicted
+   544→            if (result.evicted) {
+   545→              toast.error('You have been signed out because your account is being used on another device.', {
+   546→                duration: 6000,
+   547→              });
+   548→              useAuthStore.getState().logout();
+   549→            }
+   550→            // Otherwise (stale purge / transient error) — don't log out, let next heartbeat fix it
+   551→          }
+   552→        });
+   553→      }
+   554→      navigate(page as never, id ?? null);
+   555→      window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+   556→    },
+   557→    [navigate]
+   558→  );
+   559→
+   560→  const handleItemClick = useCallback(
+   561→    (item: ContentItem) => {
+   562→      const mediaType = (item.media_type === 'tv' ? 'tv' : 'movie') as 'movie' | 'tv';
+   563→      setPlayedItem(item);
+   564→      navigate('detail', item.id, mediaType);
+   565→      window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+   566→    },
+   567→    [navigate]
+   568→  );
+   569→
+   570→  const buildEmbedUrl = useCallback(
+   571→    (mediaType: 'movie' | 'tv', contentId: string | number, season?: number, episode?: number): string => {
+   572→      // Use direct embed URL — proxy wrapping breaks the player's origin
+   573→      // (was the root cause of CORS errors on web and "something went wrong" in PWA)
+   574→      if (mediaType === 'tv' && season !== undefined && episode !== undefined) {
+   575→        return `https://vidapi.ru/embed/tv/${contentId}/${season}/${episode}#quality=1080p`;
+   576→      }
+   577→      return `https://vidapi.ru/embed/movie/${contentId}#quality=1080p`;
+   578→    },
+   579→    [],
+   580→  );
+   581→
+   582→  /** Pick best playback source:
+   583→   *  Strategy: HLS direct stream is PRIMARY (ad-free, instant, no popups).
+   584→   *  The HLS player routes through /api/stream/proxy for CORS bypass, so
+   585→   *  it works reliably. HLS is raw video — no embed page, no ads, no popups.
+   586→   *
+   587→   *  If HLS is unavailable, fall back to iframe embed (direct, fast, but
+   588→   *  with ads). Embed is the LAST resort, not the first.
+   589→   */
+   590→  const pickBestSource = useCallback(
+   591→    (sourceData: Awaited<ReturnType<typeof fetchStreamSources>>, embedFallback: string) => {
+   592→      // HLS first — ad-free, instant, no popups
+   593→      if (sourceData.sources && sourceData.sources.length > 0) {
+   594→        const hlsSource = sourceData.sources.find((s) => s.type === 'hls');
+   595→        if (hlsSource?.url) return hlsSource.url;
+   596→        const mp4Source = sourceData.sources.find((s) => s.type === 'mp4');
+   597→        if (mp4Source?.url) return mp4Source.url;
+   598→      }
+   599→      // Fallback to embed (direct, with ads, but fast)
+   600→      if (embedFallback) return embedFallback;
+   601→      return embedFallback;
+   602→    },
+   603→    [],
+   604→  );
+   605→
+   606→  /** Build fallback URL list: HLS/MP4 direct sources first (ad-free),
+   607→   *  then embed URLs as reliable fallbacks.
+   608→   *  All URLs are passed directly — no proxy wrapping (proxy was slow and
+   609→   *  still showed ads on fallback).
+   610→   */
+   611→  const buildFallbackList = useCallback(
+   612→    (sourceData: Awaited<ReturnType<typeof fetchStreamSources>>, playSrc: string) => {
+   613→      const urls: string[] = [];
+   614→
+   615→      // Add direct HLS/MP4 sources first (ad-free, instant)
+   616→      if (sourceData.sources) {
+   617→        for (const s of sourceData.sources) {
+   618→          if (s.url && s.url !== playSrc && !urls.includes(s.url)) urls.push(s.url);
+   619→        }
+   620→      }
+   621→
+   622→      // Add embed URLs as reliable fallbacks (direct, no proxy)
+   623→      for (const fb of sourceData.fallbackUrls) {
+   624→        if (fb !== playSrc && !urls.includes(fb)) {
+   625→          urls.push(fb);
+   626→        }
+   627→      }
+   628→
+   629→      return urls;
+   630→    },
+   631→    [],
+   632→  );
+   633→
+   634→  const handlePlay = useCallback(async (item: ContentItem) => {
+   635→    const mediaType = (item.media_type === 'tv' ? 'tv' : 'movie') as 'movie' | 'tv';
+   636→    setPlayedItem(item);
+   637→
+   638→    // Cancel any in-flight source fetch to prevent stale responses
+   639→    sourceFetchControllerRef.current?.abort();
+   640→    const controller = new AbortController();
+   641→    sourceFetchControllerRef.current = controller;
+   642→
+   643→    try {
+   644→      const sourceData = await fetchStreamSources(item.id, mediaType, undefined, undefined, controller.signal);
+   645→      // Guard: if a newer play request was started while this was in-flight, discard stale response
+   646→      if (controller.signal.aborted) return;
+   647→      const playSrc = pickBestSource(sourceData, sourceData.embedUrl);
+   648→      const fallbackUrls = buildFallbackList(sourceData, playSrc);
+   649→      // Ensure src is never empty — fall back to proxy-wrapped embed URL
+   650→      const safeSrc = playSrc || buildEmbedUrl(mediaType, item.id);
+   651→      setPlayerState({
+   652→        isOpen: true,
+   653→        src: safeSrc,
+   654→        fallbackUrls: safeSrc === playSrc ? fallbackUrls : [],
+   655→        title: item.title || item.name || 'Untitled',
+   656→        poster: item.backdrop_path
+   657→          ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}`
+   658→          : undefined,
+   659→        contentId: item.id,
+   660→        mediaType,
+   661→      });
+   662→    } catch (err) {
+   663→      // If aborted due to newer play request, silently discard
+   664→      if (controller.signal.aborted) return;
+   665→      // fetchStreamSources failed — use buildEmbedUrl as primary,
+   666→      // plus fallback embed URLs from other providers
+   667→      const primaryEmbed = buildEmbedUrl(mediaType, item.id);
+   668→      const extraFallbacks: string[] = [
+   669→        // Embed.su fallback
+   670→        mediaType === 'tv'
+   671→          ? `https://embed.su/embed/tv/${item.id}/1/1`
+   672→          : `https://embed.su/embed/movie/${item.id}`,
+   673→        // 2Embed fallback
+   674→        mediaType === 'movie'
+   675→          ? `https://www.2embed.cc/embed/${item.id}`
+   676→          : `https://www.2embed.cc/embedtv/${item.id}&s=1&e=1`,
+   677→        // VidSrc.to fallback
+   678→        mediaType === 'tv'
+   679→          ? `https://vidsrc.to/embed/tv/${item.id}/1/1`
+   680→          : `https://vidsrc.to/embed/movie/${item.id}`,
+   681→      ].filter((u) => u !== primaryEmbed);
+   682→      setPlayerState({
+   683→        isOpen: true,
+   684→        src: primaryEmbed,
+   685→        fallbackUrls: extraFallbacks,
+   686→        title: item.title || item.name || 'Untitled',
+   687→        poster: item.backdrop_path
+   688→          ? `https://image.tmdb.org/t/p/w780${item.backdrop_path}`
+   689→          : undefined,
+   690→        contentId: item.id,
+   691→        mediaType,
+   692→      });
+   693→    }
+   694→  }, [buildEmbedUrl, pickBestSource, buildFallbackList]);
+   695→
+   696→  const handlePlayWithParams = useCallback(
+   697→    async (
+   698→      contentId: string | number,
+   699→      mediaType: 'movie' | 'tv',
+   700→      season?: number,
+   701→      episode?: number
+   702→    ) => {
+   703→      const title = playedItem?.title || playedItem?.name || 'Untitled';
+   704→      const seasonEp = `${season !== undefined ? ` S${season}` : ''}${episode !== undefined ? ` E${episode}` : ''}`;
+   705→
+   706→      // Cancel any in-flight source fetch to prevent stale responses
+   707→      sourceFetchControllerRef.current?.abort();
+   708→      const controller = new AbortController();
+   709→      sourceFetchControllerRef.current = controller;
+   710→
+   711→      try {
+   712→        const sourceData = await fetchStreamSources(contentId, mediaType, season, episode, controller.signal);
+   713→        if (controller.signal.aborted) return;
+   714→        const playSrc = pickBestSource(sourceData, sourceData.embedUrl);
+   715→        const fallbackUrls = buildFallbackList(sourceData, playSrc);
+   716→        // Ensure src is never empty — fall back to proxy-wrapped embed URL
+   717→        const safeSrc = playSrc || buildEmbedUrl(mediaType, contentId, season, episode);
+   718→        setPlayerState({
+   719→          isOpen: true,
+   720→          src: safeSrc,
+   721→          fallbackUrls: safeSrc === playSrc ? fallbackUrls : [],
+   722→          title: `${title}${seasonEp}`,
+   723→          poster: playedItem?.backdrop_path
+   724→            ? `https://image.tmdb.org/t/p/w780${playedItem.backdrop_path}`
+   725→            : undefined,
+   726→          contentId,
+   727→          mediaType,
+   728→          season,
+   729→          episode,
+   730→        });
+   731→      } catch (err) {
+   732→        if (controller.signal.aborted) return;
+   733→        // fetchStreamSources failed — use buildEmbedUrl as primary,
+   734→        // plus fallback embed URLs from other providers
+   735→        const primaryEmbed = buildEmbedUrl(mediaType, contentId, season, episode);
+   736→        const extraFallbacks: string[] = [
+   737→          // Embed.su fallback
+   738→          mediaType === 'tv'
+   739→            ? `https://embed.su/embed/tv/${contentId}/${season ?? 1}/${episode ?? 1}`
+   740→            : `https://embed.su/embed/movie/${contentId}`,
+   741→          // 2Embed fallback
+   742→          mediaType === 'movie'
+   743→            ? `https://www.2embed.cc/embed/${contentId}`
+   744→            : `https://www.2embed.cc/embedtv/${contentId}&s=${season ?? 1}&e=${episode ?? 1}`,
+   745→          // VidSrc.to fallback
+   746→          mediaType === 'tv'
+   747→            ? `https://vidsrc.to/embed/tv/${contentId}/${season ?? 1}/${episode ?? 1}`
+   748→            : `https://vidsrc.to/embed/movie/${contentId}`,
+   749→        ].filter((u) => u !== primaryEmbed);
+   750→        setPlayerState({
+   751→          isOpen: true,
+   752→          src: primaryEmbed,
+   753→          fallbackUrls: extraFallbacks,
+   754→          title: `${title}${seasonEp}`,
+   755→          poster: playedItem?.backdrop_path
+   756→            ? `https://image.tmdb.org/t/p/w780${playedItem.backdrop_path}`
+   757→            : undefined,
+   758→          contentId,
+   759→          mediaType,
+   760→          season,
+   761→          episode,
+   762→        });
+   763→      }
+   764→    },
+   765→    [playedItem, buildEmbedUrl, pickBestSource, buildFallbackList]
+   766→  );
+   767→
+   768→  const handleAddList = useCallback(
+   769→    (item: ContentItem) => {
+   770→      toggleWatchlist(item);
+   771→    },
+   772→    [toggleWatchlist]
+   773→  );
+   774→
+   775→  const handleClosePlayer = useCallback(() => {
+   776→    // Revoke any blob URLs created for downloaded content playback
+   777→    // to prevent memory leaks (video blobs can be 100MB+)
+   778→    for (const url of playbackBlobUrlsRef.current) {
+   779→      URL.revokeObjectURL(url);
+   780→    }
+   781→    playbackBlobUrlsRef.current = [];
+   782→
+   783→    // Free in-memory segment data held by MemoryHlsLoader.
+   784→    // Uses a ref to read hlsPlaybackId so this callback has a stable identity
+   785→    // (no dependency on playerState.hlsPlaybackId). The previous version
+   786→    // depended on playerState.hlsPlaybackId which caused the callback to be
+   787→    // recreated on every playerState change, and the async import() could race
+   788→    // with a new playback session — unregistering data that was just registered.
+   789→    const pid = hlsPlaybackIdRef.current;
+   790→    if (pid) {
+   791→      unregisterPlaybackSync(pid);
+   792→      hlsPlaybackIdRef.current = null;
+   793→    }
+   794→
+   795→    // If the host closes the player while in a party, mark it so the
+   796→    // auto-play effect doesn't immediately reopen it. Also navigate
+   797→    // to the detail page of the current party content so the host can
+   798→    // pick a different episode or movie.
+   799→    if (useWatchPartyStore.getState().isHost && useWatchPartyStore.getState().isInParty) {
+   800→      hostClosedPlayerRef.current = true;
+   801→      const party = useWatchPartyStore.getState().currentParty;
+   802→      if (party?.contentId) {
+   803→        useNavigationStore.getState().navigate(
+   804→          'detail',
+   805→          party.contentId,
+   806→          party.mediaType ?? 'movie',
+   807→        );
+   808→      }
+   809→    }
+   810→
+   811→    setPlayerState((prev) => ({ ...prev, isOpen: false, hlsPlaybackId: undefined, useHls: undefined, fmp4Blob: undefined }));
+   812→  }, []);
+   813→
+   814→  // Guard against triple invocation from React re-renders
+   815→  const playDownloadGuardRef = useRef<string | null>(null);
+   816→
+   817→  const handlePlayDownload = useCallback(
+   818→    async (task: DownloadTask) => {
+   819→      // Dedup: if the same task is already being prepared, ignore rapid re-calls
+   820→      if (playDownloadGuardRef.current === task.id) return;
+   821→      playDownloadGuardRef.current = task.id;
+   822→      // Clear guard after a safe window (covers async operations)
+   823→      setTimeout(() => { playDownloadGuardRef.current = null; }, 5000);
+   824→
+   825→      console.log(
+   826→        `[SV Playback] handlePlayDownload called: title='${task.title}', ` +
+   827→        `isHlsDownload=${task.isHlsDownload}, hasLocalCopy=${task.hasLocalCopy}, ` +
+   828→        `segmentMeta=${task.segmentMeta ? task.segmentMeta.length + ' entries' : 'none'}`,
+   829→      );
+   830→
+   831→      // Resolve blob: module-level cache first, then IndexedDB
+   832→      let blob: Blob | null = null;
+   833→      if (task.hasLocalCopy) {
+   834→        // Try module-level cache first (fast — no IndexedDB overhead)
+   835→        const { getCachedBlob } = await import('@/lib/download-service');
+   836→        blob = getCachedBlob(task.id);
+   837→        if (blob) {
+   838→          console.log(
+   839→            `[SV Playback] Blob loaded from MEMORY cache: ${blob.size} bytes, type='${blob.type}'`,
+   840→          );
+   841→        } else {
+   842→          // Fall back to IndexedDB (page was reloaded, cache is empty)
+   843→          toast.loading('Loading video…', { id: 'load-blob' });
+   844→          try {
+   845→            const { loadBlob } = await import('@/lib/download-storage');
+   846→            blob = await loadBlob(task.id);
+   847→            // Blob loaded from IndexedDB
+   848→            if (!blob) {
+   849→              // Blob not found in IndexedDB
+   850→              console.error(`[SV Playback] Blob NOT FOUND in IndexedDB for task ${task.id}`);
+   851→              toast.error('Video not found — re-download required', { id: 'load-blob' });
+   852→              return;
+   853→            }
+   854→            console.log(
+   855→              `[SV Playback] Blob loaded from IndexedDB: ${blob.size} bytes, type='${blob.type}'`,
+   856→            );
+   857→            toast.success('Ready to play', { id: 'load-blob', duration: 1500 });
+   858→          } catch (e) {
+   859→            console.error('[SV Playback] Failed to load blob from IndexedDB:', e);
+   860→            toast.error('Could not load video', { id: 'load-blob' });
+   861→            return;
+   862→          }
+   863→        }
+   864→      }
+   865→
+   866→      if (!blob) {
+   867→        // No blob available
+   868→        console.error(
+   869→          `[SV Playback] No blob available for task '${task.title}' — ` +
+   870→          `hasLocalCopy=${task.hasLocalCopy}. Cannot play.`,
+   871→        );
+   872→        return;
+   873→      }
+   874→
+   875→      // Track blob URLs created in this handler for cleanup on player close
+   876→      const blobUrlsToTrack: string[] = [];
+   877→      let videoSrc: string;
+   878→      let fmp4BlobForMse: Blob | undefined;
+   879→
+   880→      let useMemoryLoaderPath = false;
+   881→      if (task.isHlsDownload && blob.type === 'video/mp2t' && task.segmentMeta && task.segmentMeta.length > 0) {
+   882→        // ── Raw TS download (remux failed) → play via HLS.js + MemoryHlsLoader ──
+   883→        // This is the fallback path when TS→MP4 remuxing fails.
+   884→        // New downloads are remuxed to MP4 and skip this path entirely.
+   885→        console.warn(
+   886→          `[SV Playback] ⚠️ Using FALLBACK MemoryHlsLoader path — blob type is '${blob.type}', ` +
+   887→          `meaning TS→MP4 remux FAILED during download. This path is prone to freezing/desync.`,
+   888→        );
+   889→        const playbackId = task.id;
+   890→        const segmentCount = task.segmentMeta.length;
+   891→        toast.loading('Preparing video for playback…', { id: 'mem-loader' });
+   892→
+   893→        try {
+   894→          const maxDuration = task.segmentMeta.reduce(
+   895→            (max, seg) => Math.max(max, seg.duration), 0,
+   896→          );
+   897→
+   898→          const m3u8Lines = [
+   899→            '#EXTM3U',
+   900→            '#EXT-X-VERSION:3',
+   901→            `#EXT-X-TARGETDURATION:${Math.ceil(maxDuration)}`,
+   902→            '#EXT-X-PLAYLIST-TYPE:VOD',
+   903→            '#EXT-X-MEDIA-SEQUENCE:0',
+   904→          ];
+   905→          for (let i = 0; i < segmentCount; i++) {
+   906→            const seg = task.segmentMeta[i];
+   907→            if (seg.discontinuity) {
+   908→              m3u8Lines.push('#EXT-X-DISCONTINUITY');
+   909→            }
+   910→            m3u8Lines.push(`#EXTINF:${seg.duration.toFixed(6)},`);
+   911→            m3u8Lines.push(`mem://${playbackId}/seg/${i}`);
+   912→          }
+   913→          m3u8Lines.push('#EXT-X-ENDLIST');
+   914→          const m3u8 = m3u8Lines.join('\n');
+   915→
+   916→          console.log(
+   917→            `[SV Playback] Generated fake m3u8: ${segmentCount} segments, ` +
+   918→            `TARGETDURATION=${Math.ceil(maxDuration)}, total m3u8 length=${m3u8.length} chars`,
+   919→          );
+   920→
+   921→          const { registerPlayback } = await import('@/lib/hls-memory-loader');
+   922→          registerPlayback(playbackId, m3u8, blob, task.segmentMeta);
+   923→
+   924→          hlsPlaybackIdRef.current = playbackId;
+   925→
+   926→          videoSrc = `mem://${playbackId}/playlist.m3u8`;
+   927→          useMemoryLoaderPath = true;
+   928→          toast.success('Ready to play', { id: 'mem-loader', duration: 1500 });
+   929→        } catch (err) {
+   930→          console.error(`[SV Playback] MemoryHlsLoader setup FAILED:`, err);
+   931→          toast.error('Could not prepare video for playback', { id: 'mem-loader' });
+   932→          return;
+   933→        }
+   934→      } else if (task.isHlsDownload && blob.type === 'video/mp4') {
+   935→        // ── Remuxed fMP4 download → play via direct blob URL ──
+   936→        // The TS→MP4 remux during download produced a proper, self-contained
+   937→        // MP4 file. Direct blob URL playback is the most reliable path —
+   938→        // the browser's native MP4 demuxer handles everything correctly.
+   939→        //
+   940→        // Why NOT MSE (MediaSource Extensions)?
+   941→        // MSE progressive playback was attempted here before, but it causes
+   942→        // QuotaExceededError infinite loops on large files (SourceBuffer quota
+   943→        // fills up, evictBefore() can't free enough when currentTime is low,
+   944→        // appendNext() retries infinitely). MSE is designed for live/streaming
+   945→        // content, not for playing a complete downloaded file.
+   946→        console.log(
+   947→          `[SV Playback] ✓ Using blob URL playback path — blob type='${blob.type}', ` +
+   948→          `size=${(blob.size / 1024 / 1024).toFixed(2)} MB.`,
+   949→        );
+   950→        videoSrc = URL.createObjectURL(blob);
+   951→        blobUrlsToTrack.push(videoSrc);
+   952→      } else {
+   953→        // ── Direct MP4 download → play via blob URL ──
+   954→        console.log(
+   955→          `[SV Playback] ✓ Using blob URL playback path — blob type='${blob.type}', ` +
+   956→          `size=${(blob.size / 1024 / 1024).toFixed(2)} MB.`,
+   957→        );
+   958→        videoSrc = URL.createObjectURL(blob);
+   959→        blobUrlsToTrack.push(videoSrc);
+   960→      }
+   961→
+   962→      // Load subtitles from IndexedDB if available
+   963→      const subtitleUrls: Record<string, string> = {};
+   964→      if (task.hasSubtitles && task.subtitleTracks) {
+   965→        try {
+   966→          const { loadSubtitle } = await import('@/lib/download-storage');
+   967→          for (const track of task.subtitleTracks) {
+   968→            const vttContent = await loadSubtitle(task.id, track.language);
+   969→            if (vttContent) {
+   970→              const vttBlob = new Blob([vttContent], { type: 'text/vtt' });
+   971→              const url = URL.createObjectURL(vttBlob);
+   972→              subtitleUrls[track.language] = url;
+   973→              blobUrlsToTrack.push(url);
+   974→            }
+   975→          }
+   976→        } catch {
+   977→          // Subtitle loading failed — play without subtitles
+   978→        }
+   979→      }
+   980→
+   981→      playbackBlobUrlsRef.current = blobUrlsToTrack;
+   982→      const title = `${task.title}${task.season !== undefined && task.episode !== undefined ? ` S${task.season} E${task.episode}` : ''}`;
+   983→      // Load cached poster from IndexedDB (avoids CORS — image.tmdb.org blocks direct fetch)
+   984→      let posterSrc: string | undefined;
+   985→      if (task.posterUrl) {
+   986→        try {
+   987→          const { loadPoster } = await import('@/lib/download-storage');
+   988→          const posterBlob = await loadPoster(task.contentId);
+   989→          if (posterBlob) {
+   990→            posterSrc = URL.createObjectURL(posterBlob);
+   991→            blobUrlsToTrack.push(posterSrc);
+   992→          } else {
+   993→            // Fallback: proxy through API to avoid CORS
+   994→            posterSrc = `/api/stream/proxy?url=${encodeURIComponent(task.posterUrl)}`;
+   995→          }
+   996→        } catch {
+   997→          posterSrc = `/api/stream/proxy?url=${encodeURIComponent(task.posterUrl)}`;
+   998→        }
+   999→      }
+  1000→
+  1001→      setPlayerState({
+  1002→        isOpen: true,
+  1003→        src: videoSrc,
+  1004→        fallbackUrls: [],
+  1005→        title,
+  1006→        poster: posterSrc,
+  1007→        contentId: task.contentId,
+  1008→        mediaType: task.mediaType,
+  1009→        season: task.season,
+  1010→        episode: task.episode,
+  1011→        subtitleUrls: Object.keys(subtitleUrls).length > 0 ? subtitleUrls : undefined,
+  1012→        subtitleTracks: task.subtitleTracks,
+  1013→        // HLS.js + MemoryHlsLoader for TS downloads; MSE for fMP4; blob URL for direct downloads
+  1014→        useHls: useMemoryLoaderPath,
+  1015→        hlsPlaybackId: useMemoryLoaderPath ? task.id : undefined,
+  1016→        fmp4Blob: fmp4BlobForMse,
+  1017→        autoPlay: true,
+  1018→      });
+  1019→      setDownloadPanelOpen(false);
+  1020→    },
+  1021→    [setDownloadPanelOpen],
+  1022→  );
+  1023→
+  1024→  const handleProgressUpdate = useCallback(
+  1025→    (time: number, duration: number) => {
+  1026→      if (!playerState.contentId || duration <= 0) return;
+  1027→      updateProgress({
+  1028→        contentId: playerState.contentId,
+  1029→        mediaType: playerState.mediaType,
+  1030→        season: playerState.season,
+  1031→        episode: playerState.episode,
+  1032→        progress: time,
+  1033→        duration,
+  1034→        updatedAt: Date.now(),
+  1035→      });
+  1036→    },
+  1037→    [playerState.contentId, playerState.mediaType, playerState.season, playerState.episode, updateProgress]
+  1038→  );
+  1039→
+  1040→  // ── Watch Party Handlers ────────────────────────────────
+  1041→  const handleWpPickContent = useCallback(async (item: ContentItem & { season?: number; episode?: number }) => {
+  1042→    if (!currentParty) return;
+  1043→    const mediaType = (item.media_type === 'tv' ? 'tv' : 'movie') as 'movie' | 'tv';
+  1044→    await wpSocket.pickContent({
+  1045→      contentId: String(item.id),
+  1046→      mediaType,
+  1047→      season: item.season,
+  1048→      episode: item.episode,
+  1049→      contentTitle: item.title || item.name || 'Untitled',
+  1050→      contentPoster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : undefined,
+  1051→    });
+  1052→  }, [currentParty, wpSocket.pickContent]);
+  1053→
+  1054→  const handleWpStartParty = useCallback(async () => {
+  1055→    hostClosedPlayerRef.current = false;
+  1056→    useWatchPartyStore.getState().setRoomVisible(false);
+  1057→    await wpSocket.startParty(0);
+  1058→    // The auto-play effect (below) handles opening the player for the host.
+  1059→    // We do NOT call handlePlay here because it would race with the
+  1060→    // auto-play effect, causing the fetch to be aborted and the player
+  1061→    // to never open. The auto-play effect triggers on currentParty.status
+  1062→    // changing to 'playing' (set by startParty above).
+  1063→  }, [wpSocket.startParty]);
+  1064→
+  1065→  const handleWpAcceptInvite = useCallback(async (invitation: WatchPartyInvitation) => {
+  1066→    const result = await wpSocket.acceptInvite(invitation.partyId);
+  1067→    // acceptInvite shows its own detailed step-by-step error toasts.
+  1068→    // On success: toast.success('Joined watch party!')
+  1069→    // On failure: specific error messages with DB error details
+  1070→    // Fallback if the store wasn't updated but no toast was shown:
+  1071→    if (!result) {
+  1072→      const store = useWatchPartyStore.getState();
+  1073→      if (!store.isInParty) {
+  1074→        toast.error('Could not join the watch party. It may have ended or you lack permission.', { id: 'wp-join-flow' });
+  1075→      }
+  1076→    }
+  1077→  }, [wpSocket.acceptInvite]);
+  1078→
+  1079→  const handleWpRejectInvite = useCallback(async (invitation: WatchPartyInvitation) => {
+  1080→    await wpSocket.rejectInvite(invitation.partyId, invitation.hostId);
+  1081→  }, [wpSocket.rejectInvite]);
+  1082→
+  1083→  const handleWpPlayContent = useCallback(async (item: ContentItem) => {
+  1084→    // Play the content the host picked for the watch party
+  1085→    await handlePlay(item);
+  1086→  }, [handlePlay]);
+  1087→
+  1088→  // ── Watch Party: Auto-play content when party starts ───
+  1089→  useEffect(() => {
+  1090→    if (!currentParty || !currentParty.contentId || currentParty.status !== 'playing') return;
+  1091→    if (playerState.isOpen && String(playerState.contentId) === String(currentParty.contentId)) return;
+  1092→
+  1093→    // If the host explicitly closed the player to change content, don't
+  1094→    // auto-reopen it. The host will open the player manually when ready.
+  1095→    // (Members should always auto-play.)
+  1096→    if (isHost && hostClosedPlayerRef.current) return;
+  1097→
+  1098→    // Auto-play the content for the watch party.
+  1099→    // Minimize the room panel so it doesn't overlap the player.
+  1100→    useWatchPartyStore.getState().setRoomVisible(false);
+  1101→
+  1102→    const item: ContentItem = {
+  1103→      id: currentParty.contentId,
+  1104→      title: currentParty.contentTitle ?? undefined,
+  1105→      name: currentParty.contentTitle ?? undefined,
+  1106→      media_type: currentParty.mediaType ?? 'movie',
+  1107→      backdrop_path: currentParty.contentPoster ? currentParty.contentPoster.replace('https://image.tmdb.org/t/p/w500', '') : undefined,
+  1108→      poster_path: currentParty.contentPoster ? currentParty.contentPoster.replace('https://image.tmdb.org/t/p/w500', '') : undefined,
+  1109→    };
+  1110→
+  1111→    // For TV shows with season/episode info, use handlePlayWithParams
+  1112→    if (currentParty.mediaType === 'tv' && currentParty.season != null && currentParty.episode != null) {
+  1113→      handlePlayWithParams(item.id, 'tv', currentParty.season, currentParty.episode);
+  1114→    } else {
+  1115→      handlePlay(item);
+  1116→    }
+  1117→  }, [currentParty?.status, currentParty?.contentId, currentParty?.mediaType, currentParty?.season, currentParty?.episode, currentParty?.playbackState?.isPlaying, handlePlay, playerState.isOpen, playerState.contentId]);
+  1118→
+  1119→  // ── Watch Party: Host auto-pick + start when opening player directly ───
+  1120→  // When the host opens the video player while in a party, automatically
+  1121→  // pick the content and start the party so members see it too.
+  1122→  useEffect(() => {
+  1123→    if (!isHost || !isInParty || !currentParty) return;
+  1124→    if (!playerState.isOpen || !playerState.contentId) return;
+  1125→
+  1126→    // Host manually opened the player — clear the "closed by host" flag
+  1127→    // so future content changes will auto-play again.
+  1128→    hostClosedPlayerRef.current = false;
+  1129→
+  1130→    const partyContentId = currentParty.contentId
+  1131→    const playerContentId = String(playerState.contentId)
+  1132→
+  1133→    // Auto-pick content if not yet picked or if the host switched content
+  1134→    // IMPORTANT: await pickContent before startParty to prevent race condition
+  1135→    // where startParty broadcasts before content is set in DB, causing members
+  1136→    // to see status='playing' but contentId=null.
+  1137→    if (!partyContentId || String(partyContentId) !== playerContentId) {
+  1138→      wpSocket.pickContent({
+  1139→        contentId: playerContentId,
+  1140→        mediaType: playerState.mediaType ?? 'movie',
+  1141→        season: playerState.season ?? undefined,
+  1142→        episode: playerState.episode ?? undefined,
+  1143→        contentTitle: playerState.title || 'Untitled',
+  1144→        contentPoster: playerState.poster ?? undefined,
+  1145→      }).then(() => {
+  1146→        // Start the party only after content is successfully picked
+  1147→        if (useWatchPartyStore.getState().currentParty?.status === 'waiting') {
+  1148→          wpSocket.startParty(0);
+  1149→        }
+  1150→      });
+  1151→    } else if (currentParty.status === 'waiting') {
+  1152→      // Content already picked — just start the party
+  1153→      wpSocket.startParty(0);
+  1154→    }
+  1155→  }, [isHost, isInParty, currentParty, playerState.isOpen, playerState.contentId, playerState.mediaType, playerState.season, playerState.episode, playerState.title, playerState.poster, wpSocket.pickContent, wpSocket.startParty]);
+  1156→
+  1157→  // ── Watch Party: Host closes player → pause party ───
+  1158→  // When the host exits the video player while the party is playing,
+  1159→  // send a pause event so members also pause and the UI reflects the
+  1160→  // correct state instead of showing "Now playing" indefinitely.
+  1161→  const prevPlayerOpenRef = useRef(false);
+  1162→  useEffect(() => {
+  1163→    const playerJustClosed = prevPlayerOpenRef.current && !playerState.isOpen;
+  1164→    prevPlayerOpenRef.current = playerState.isOpen;
+  1165→
+  1166→    if (!isHost || !isInParty || !currentParty) return;
+  1167→    if (!playerJustClosed) return;
+  1168→    if (currentParty.status !== 'playing' || !currentParty.playbackState.isPlaying) return;
+  1169→
+  1170→    // Host closed the player — pause the party for everyone
+  1171→    wpSocket.sendPause(currentParty.playbackState.currentTime);
+  1172→  }, [isHost, isInParty, currentParty, playerState.isOpen, wpSocket.sendPause]);
+  1173→
+  1174→  // ── Clear host-closed-player flag when leaving party ───
+  1175→  useEffect(() => {
+  1176→    if (!isInParty) hostClosedPlayerRef.current = false;
+  1177→  }, [isInParty]);
+  1178→
+  1179→  // ── When party ends while watching, close player and go home ──
+  1180→  const prevIsInPartyRef = useRef(isInParty);
+  1181→  useEffect(() => {
+  1182→    const justLeftParty = prevIsInPartyRef.current && !isInParty;
+  1183→    prevIsInPartyRef.current = isInParty;
+  1184→
+  1185→    if (justLeftParty && playerState.isOpen) {
+  1186→      handleClosePlayer();
+  1187→      useNavigationStore.getState().navigate('home');
+  1188→    }
+  1189→  }, [isInParty, playerState.isOpen, handleClosePlayer]);
+  1190→
+  1191→  const handleCompleted = useCallback(async () => {
+  1192→    if (
+  1193→      playerState.mediaType === 'tv' &&
+  1194→      playerState.contentId != null &&
+  1195→      playerState.season != null &&
+  1196→      playerState.episode != null
+  1197→    ) {
+  1198→      const currentSeason = playerState.season;
+  1199→      const currentEpisode = playerState.episode;
+  1200→      const tvId = playerState.contentId;
+  1201→
+  1202→      try {
+  1203→        const { fetchSeasonDetail } = await import('@/services/api');
+  1204→        const episodes = await fetchSeasonDetail(tvId, currentSeason);
+  1205→        const nextEpisode = episodes.find((ep) => ep.episode_number === currentEpisode + 1);
+  1206→
+  1207→        if (nextEpisode) {
+  1208→          const title = playedItem?.title || playedItem?.name || 'Untitled';
+  1209→          const embedUrl = buildEmbedUrl('tv', tvId, currentSeason, nextEpisode.episode_number);
+  1210→          setPlayerState({
+  1211→            isOpen: true,
+  1212→            src: embedUrl,
+  1213→            fallbackUrls: [],
+  1214→            title: `${title} S${currentSeason} E${nextEpisode.episode_number}`,
+  1215→            poster: playedItem?.backdrop_path
+  1216→              ? `https://image.tmdb.org/t/p/w780${playedItem.backdrop_path}`
+  1217→              : undefined,
+  1218→            contentId: tvId,
+  1219→            mediaType: 'tv',
+  1220→            season: currentSeason,
+  1221→            episode: nextEpisode.episode_number,
+  1222→          });
+  1223→          return;
+  1224→        }
+  1225→      } catch {
+  1226→        // Failed to fetch season info — close player
+  1227→      }
+  1228→      handleClosePlayer();
+  1229→    } else {
+  1230→      handleClosePlayer();
+  1231→    }
+  1232→  }, [playerState, playedItem, buildEmbedUrl, handleClosePlayer]);
+  1233→
+  1234→  const watchlistIdSet = useMemo(
+  1235→    () => new Set(watchlistItems.map((i) => String(i.id))),
+  1236→    [watchlistItems]
+  1237→  );
+  1238→  const isInList = useCallback(
+  1239→    (id: string | number) => watchlistIdSet.has(String(id)),
+  1240→    [watchlistIdSet]
+  1241→  );
+  1242→
+  1243→  const handleSearchSubmit = useCallback(
+  1244→    (query: string) => {
+  1245→      if (query.trim()) setSearchOpen(true);
+  1246→    },
+  1247→    [setSearchOpen]
+  1248→  );
+  1249→
+  1250→  const handleSearchNavigate = useCallback(
+  1251→    (page: string, id?: string | number) => {
+  1252→      setSearchOpen(false);
+  1253→      if (id !== undefined) {
+  1254→        navigate(page as never, id);
+  1255→        window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+  1256→      } else {
+  1257→        navigate(page as never);
+  1258→      }
+  1259→    },
+  1260→    [setSearchOpen, navigate]
+  1261→  );
+  1262→
+  1263→  const navSearchQuery = isSearchOpen ? '' : '';
+  1264→  const setNavSearchQuery = useCallback((q: string) => { void q; }, []);
+  1265→
+  1266→  const handleDetailNavigate = useCallback(
+  1267→    (item: ContentItem) => {
+  1268→      const mediaType = (item.media_type === 'tv' ? 'tv' : 'movie') as 'movie' | 'tv';
+  1269→      setPlayedItem(item);
+  1270→      navigate('detail', item.id, mediaType);
+  1271→      window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior });
+  1272→    },
+  1273→    [navigate]
+  1274→  );
+  1275→
+  1276→  // ── Splash screen (while auth + prefetch resolve) ──────
+  1277→  if (!splashDone || status === 'loading') {
+  1278→    return <SplashScreen />;
+  1279→  }
+  1280→
+  1281→  if (status === 'unauthenticated') {
+  1282→    return (
+  1283→      <div className="h-dvh bg-[#080808] flex flex-col select-none-native">
+  1284→        <main className="flex-1 flex flex-col min-h-0">
+  1285→          <LoginScreen />
+  1286→        </main>
+  1287→        <DownloadPanel
+  1288→          isOpen={isDownloadPanelOpen}
+  1289→          onClose={() => setDownloadPanelOpen(false)}
+  1290→          onPlayDownload={handlePlayDownload}
+  1291→        />
+  1292→      </div>
+  1293→    );
+  1294→  }
+  1295→
+  1296→  if (status === 'needs_profile') {
+  1297→    return (
+  1298→      <div className="h-dvh bg-[#080808] flex flex-col select-none-native">
+  1299→        <main className="flex-1 flex flex-col min-h-0">
+  1300→          <ProfileCompletionScreen />
+  1301→        </main>
+  1302→      </div>
+  1303→    );
+  1304→  }
+  1305→
+  1306→  // ── Authenticated: render full app ───────────────────────
+  1307→  return (
+  1308→    <div
+  1309→      className="bg-[#080808] text-[#F5F5F5] flex flex-col select-none-native overflow-hidden h-dvh"
+  1310→    >
+  1311→      {isOffline && (
+  1312→        <div
+  1313→          className="fixed top-0 left-0 right-0 z-[60] flex items-center justify-center gap-2 bg-[#1a1a0a]/95 border-b border-yellow-600/30 px-4 py-1.5 text-xs text-yellow-400/90 backdrop-blur-sm"
+  1314→        >
+  1315→          <WifiOff className="size-3.5" />
+  1316→          <span>You&apos;re offline. Downloads and cached content available.</span>
+  1317→        </div>
+  1318→      )}
+  1319→
+  1320→      {(currentPage === 'home' || currentPage === 'browse' || currentPage === 'movies' || currentPage === 'series') && (
+  1321→        <Navbar
+  1322→          onNavigate={handleNavigate}
+  1323→          currentPage={currentPage}
+  1324→          onSearchOpen={() => setSearchOpen(!isSearchOpen)}
+  1325→          searchOpen={isSearchOpen}
+  1326→          searchQuery={navSearchQuery}
+  1327→          onSearchChange={setNavSearchQuery}
+  1328→          onSearchSubmit={handleSearchSubmit}
+  1329→          scrollRoot={mainRef}
+  1330→        />
+  1331→      )}
+  1332→
+  1333→      <MobileNav onNavigate={handleNavigate} currentPage={currentPage} />
+  1334→
+  1335→      <SearchOverlay
+  1336→        isOpen={isSearchOpen}
+  1337→        onClose={() => setSearchOpen(false)}
+  1338→        onNavigate={handleSearchNavigate}
+  1339→        onItemClick={handleItemClick}
+  1340→        restoreQuery={savedSearchQuery || undefined}
+  1341→        restoreResults={savedSearchResults.length > 0 ? savedSearchResults : undefined}
+  1342→        restoreFilters={savedSearchFilters}
+  1343→        onRestoreConsumed={() => {
+  1344→          clearSavedSearch();
+  1345→          setNavigatedFromSearch(false);
+  1346→        }}
+  1347→      />
+  1348→
+  1349→      <main
+  1350→        ref={mainRef}
+  1351→        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden momentum-scroll"
+  1352→        style={{
+  1353→          paddingTop: (currentPage === 'home' || currentPage === 'browse' || currentPage === 'movies' || currentPage === 'series')
+  1354→            ? '3.5rem'
+  1355→            : '0.25rem',
+  1356→          /* Bottom padding = nav pill height + small gap */
+  1357→          paddingBottom: '62px',
+  1358→          overscrollBehavior: 'none',
+  1359→        }}
+  1360→      >
+  1361→        <AnimatePresence mode="wait" initial={false} custom={navDirection}>
+  1362→          {currentPage === 'home' && (
+  1363→            <motion.div
+  1364→              key="home"
+  1365→              custom={navDirection}
+  1366→              initial={pageVariants.initial}
+  1367→              animate={pageVariants.animate}
+  1368→              exit={pageVariants.exit}
+  1369→              variants={pageVariants}
+  1370→              transition={iosTransition}
+  1371→            >
+  1372→              <HomePage onNavigate={handleNavigate} onItemClick={handleItemClick} onPlay={handlePlay} onAddList={handleAddList} isInList={isInList} scrollRoot={mainRef} />
+  1373→            </motion.div>
+  1374→          )}
+  1375→
+  1376→          {(currentPage === 'browse' || currentPage === 'movies' || currentPage === 'series') && (
+  1377→            <motion.div
+  1378→              key="browse"
+  1379→              custom={navDirection}
+  1380→              initial="initial"
+  1381→              animate="animate"
+  1382→              exit="exit"
+  1383→              variants={pageVariants}
+  1384→              transition={iosTransition}
+  1385→            >
+  1386→              <BrowsePage onNavigate={handleNavigate} onItemClick={handleDetailNavigate} scrollRoot={mainRef} />
+  1387→            </motion.div>
+  1388→          )}
+  1389→
+  1390→          {currentPage === 'mylist' && (
+  1391→            <motion.div
+  1392→              key="mylist"
+  1393→              custom={navDirection}
+  1394→              initial="initial"
+  1395→              animate="animate"
+  1396→              exit="exit"
+  1397→              variants={pageVariants}
+  1398→              transition={iosTransition}
+  1399→            >
+  1400→              <WatchlistPage onNavigate={handleNavigate} onItemClick={handleDetailNavigate} onRemove={removeWatchlist} />
+  1401→            </motion.div>
+  1402→          )}
+  1403→
+  1404→          {currentPage === 'downloads' && (
+  1405→            <motion.div
+  1406→              key="downloads"
+  1407→              custom={navDirection}
+  1408→              initial="initial"
+  1409→              animate="animate"
+  1410→              exit="exit"
+  1411→              variants={pageVariants}
+  1412→              transition={iosTransition}
+  1413→            >
+  1414→              <DownloadsPage onNavigate={handleNavigate} onPlayDownload={handlePlayDownload} />
+  1415→            </motion.div>
+  1416→          )}
+  1417→
+  1418→          {currentPage === 'profile' && (
+  1419→            <motion.div
+  1420→              key="profile"
+  1421→              custom={navDirection}
+  1422→              initial="initial"
+  1423→              animate="animate"
+  1424→              exit="exit"
+  1425→              variants={pageVariants}
+  1426→              transition={iosTransition}
+  1427→            >
+  1428→              <ProfilePage />
+  1429→            </motion.div>
+  1430→          )}
+  1431→
+  1432→          {currentPage === 'detail' && selectedContentId != null && (
+  1433→            <motion.div
+  1434→              key={`detail-${selectedContentId}`}
+  1435→              custom={navDirection}
+  1436→              initial="initial"
+  1437→              animate="animate"
+  1438→              exit="exit"
+  1439→              variants={detailPageVariants}
+  1440→              transition={iosSpringTransition}
+  1441→            >
+  1442→              <DetailPage
+  1443→                contentId={selectedContentId}
+  1444→                mediaType={selectedMediaType}
+  1445→                onBack={goBack}
+  1446→                onPlay={handlePlayWithParams}
+  1447→                onNavigateItem={handleItemClick}
+  1448→                isInWatchlist={isInList}
+  1449→                onToggleWatchlist={(id) => { if (playedItem) toggleWatchlist(playedItem); }}
+  1450→              />
+  1451→            </motion.div>
+  1452→          )}
+  1453→        </AnimatePresence>
+  1454→      </main>
+  1455→
+  1456→      <DownloadPanel isOpen={isDownloadPanelOpen} onClose={() => setDownloadPanelOpen(false)} onPlayDownload={handlePlayDownload} />
+  1457→
+  1458→      {/* ── Watch Party ──────────────────────────────────── */}
+  1459→      <WatchPartyInviteOverlay
+  1460→        onAccept={handleWpAcceptInvite}
+  1461→        onReject={handleWpRejectInvite}
+  1462→      />
+  1463→      <WatchPartyRoom
+  1464→        onPickContent={() => { if (isHost) { setWpContentPickerOpen(true); useWatchPartyStore.getState().setRoomVisible(false); } }}
+  1465→        onStartParty={handleWpStartParty}
+  1466→        onLeave={() => wpSocket.leaveRoom()}
+  1467→        onEnd={() => wpSocket.endRoom()}
+  1468→        onPttStart={() => wpSocket.sendPttStart()}
+  1469→        onPttStop={() => wpSocket.sendPttStop()}
+  1470→      />
+  1471→      <WatchPartyContentPicker
+  1472→        open={wpContentPickerOpen}
+  1473→        onClose={() => setWpContentPickerOpen(false)}
+  1474→        onPick={handleWpPickContent}
+  1475→      />
+  1476→
+  1477→      <AnimatePresence>
+  1478→        {playerState.isOpen && (
+  1479→          <VideoPlayer
+  1480→            src={playerState.src}
+  1481→            fallbackUrls={playerState.fallbackUrls}
+  1482→            poster={playerState.poster}
+  1483→            title={playerState.title}
+  1484→            startTime={playerState.startTime}
+  1485→            onClose={handleClosePlayer}
+  1486→            onProgressUpdate={handleProgressUpdate}
+  1487→            onCompleted={handleCompleted}
+  1488→            contentId={playerState.contentId}
+  1489→            mediaType={playerState.mediaType}
+  1490→            season={playerState.season}
+  1491→            episode={playerState.episode}
+  1492→            subtitleUrls={playerState.subtitleUrls}
+  1493→            subtitleTracks={playerState.subtitleTracks}
+  1494→            useHls={playerState.useHls}
+  1495→            hlsPlaybackId={playerState.hlsPlaybackId}
+  1496→            fmp4Blob={playerState.fmp4Blob}
+  1497→            autoPlay
+  1498→            watchPartySync={isInParty ? {
+  1499→              isHost,
+  1500→              pausedBy: currentParty?.playbackState.pausedBy ?? null,
+  1501→              onPause: wpSocket.sendPause,
+  1502→              onPlay: wpSocket.sendPlay,
+  1503→              onSeek: wpSocket.sendSeek,
+  1504→              onSync: wpSocket.sendSync,
+  1505→              pauseNotification,
+  1506→              onPttStart: wpSocket.sendPttStart,
+  1507→              onPttStop: wpSocket.sendPttStop,
+  1508→              isPttActive,
+  1509→              talkingMembers: new Set(talkingMembers.keys()),
+  1510→              hostCurrentTime: currentParty?.playbackState.currentTime,
+  1511→              hostIsPlaying: currentParty?.playbackState.isPlaying,
+  1512→              members: currentParty?.members.map(m => ({ userId: m.userId, displayName: m.displayName, avatarUrl: m.avatarUrl, isHost: m.isHost })),
+  1513→              localUserId: useAuthStore.getState().user?.id,
+  1514→              partyStartTime: useWatchPartyStore.getState().partyStartTime,
+  1515→              lastSyncSentAt: wpSocket.getLastSyncSentAt(),
+  1516→            } : undefined}
+  1517→          />
+  1518→        )}
+  1519→      </AnimatePresence>
+  1520→    </div>
+  1521→  );
+  1522→}
+  1523→

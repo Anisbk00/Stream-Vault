@@ -96,6 +96,55 @@ export function resetSupabaseClient(): void {
   _client = null;
 }
 
+/**
+ * Attempt to refresh the Supabase session.
+ * Called when the JWT is expired but a refresh_token may still be valid
+ * (e.g., PWA waking from long background/sleep).
+ *
+ * Returns the refreshed session on success, or null on failure.
+ * On failure, the caller should transition to unauthenticated gracefully.
+ */
+export async function refreshSession(): Promise<{
+  session: Awaited<ReturnType<SupabaseClient<Database>['auth']['getSession']>['data']['session']>;
+  error: string | null;
+}> {
+  try {
+    const { data, error } = await supabase.auth.refreshSession();
+    if (error) {
+      console.warn('[AUTH] refreshSession failed:', error.message);
+      return { session: null, error: error.message };
+    }
+    console.warn('[AUTH] refreshSession succeeded, new expiry:', data.session?.expires_at);
+    return { session: data.session, error: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown refresh error';
+    console.warn('[AUTH] refreshSession exception:', msg);
+    return { session: null, error: msg };
+  }
+}
+
+/**
+ * Validate whether the current session's access_token is expired.
+ * Decodes the JWT payload without verification (client-side check only).
+ * Returns true if the token is expired or cannot be decoded.
+ */
+export function isSessionTokenExpired(): boolean {
+  if (typeof window === 'undefined') return true;
+  try {
+    const raw = localStorage.getItem('movera-auth-token');
+    if (!raw) return true;
+    const session = JSON.parse(raw);
+    const token = session?.access_token;
+    if (!token || typeof token !== 'string') return true;
+    const payloadB64 = token.split('.')[1];
+    if (!payloadB64) return true;
+    const payload = JSON.parse(atob(payloadB64));
+    return Date.now() >= payload.exp * 1000;
+  } catch {
+    return true;
+  }
+}
+
 // For compatibility: export as named export that behaves like the old singleton
 export const supabase = new Proxy({} as SupabaseClient<Database>, {
   get(_target, prop) {

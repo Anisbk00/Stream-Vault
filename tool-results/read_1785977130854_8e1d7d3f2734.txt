@@ -1,0 +1,680 @@
+     1→     1→import { create } from 'zustand';
+     2→     2→import { persist } from 'zustand/middleware';
+     3→     3→import type { ContentItem, NavigationPage, WatchProgress } from '@/types/streaming';
+     4→     4→import { getAuthToken } from '@/lib/session-manager';
+     5→     5→
+     6→     6→export type NavDirection = 'forward' | 'back' | 'tab';
+     7→     7→
+     8→     8→interface NavigationState {
+     9→     9→  currentPage: NavigationPage;
+    10→    10→  previousPage: NavigationPage | null;
+    11→    11→  selectedContentId: string | number | null;
+    12→    12→  selectedMediaType: 'movie' | 'tv';
+    13→    13→  selectedSeasonNumber: number;
+    14→    14→  direction: NavDirection;
+    15→    15→  navigatedFromSearch: boolean;
+    16→    16→  navigate: (page: NavigationPage, contentId?: string | number | null, mediaType?: 'movie' | 'tv') => void;
+    17→    17→  goBack: () => void;
+    18→    18→  setSeason: (season: number) => void;
+    19→    19→  setNavigatedFromSearch: (value: boolean) => void;
+    20→    20→}
+    21→    21→
+    22→    22→const TAB_PAGES: NavigationPage[] = ['home', 'browse', 'downloads', 'mylist', 'profile'];
+    23→    23→
+    24→    24→export const useNavigationStore = create<NavigationState>((set, get) => ({
+    25→    25→  currentPage: 'home',
+    26→    26→  previousPage: null,
+    27→    27→  selectedContentId: null,
+    28→    28→  selectedMediaType: 'movie',
+    29→    29→  selectedSeasonNumber: 1,
+    30→    30→  direction: 'tab' as NavDirection,
+    31→    31→  navigatedFromSearch: false,
+    32→    32→  navigate: (page, contentId = null, mediaType) => {
+    33→    33→    const current = get().currentPage;
+    34→    34→    // Determine direction: push to detail = forward, back from detail = back, else tab switch
+    35→    35→    let direction: NavDirection = 'tab';
+    36→    36→    if (page === 'detail') {
+    37→    37→      direction = 'forward';
+    38→    38→    } else if (current === 'detail') {
+    39→    39→      direction = 'back';
+    40→    40→    }
+    41→    41→    set({
+    42→    42→      previousPage: current,
+    43→    43→      currentPage: page,
+    44→    44→      selectedContentId: contentId,
+    45→    45→      selectedMediaType: mediaType ?? get().selectedMediaType,
+    46→    46→      selectedSeasonNumber: 1,
+    47→    47→      direction,
+    48→    48→      // Clear search context when navigating to a non-detail page
+    49→    49→      navigatedFromSearch: page === 'detail' ? get().navigatedFromSearch : false,
+    50→    50→    });
+    51→    51→  },
+    52→    52→  goBack: () => {
+    53→    53→    const prev = get().previousPage;
+    54→    54→    const cameFromSearch = get().navigatedFromSearch;
+    55→    55→    set({
+    56→    56→      currentPage: prev || 'home',
+    57→    57→      previousPage: 'home',
+    58→    58→      selectedContentId: prev === 'detail' ? get().selectedContentId : null,
+    59→    59→      direction: 'back' as NavDirection,
+    60→    60→      // Keep navigatedFromSearch true so MoveraApp can re-open search overlay
+    61→    61→      navigatedFromSearch: cameFromSearch,
+    62→    62→    });
+    63→    63→  },
+    64→    64→  setSeason: (season) => set({ selectedSeasonNumber: season }),
+    65→    65→  setNavigatedFromSearch: (value) => set({ navigatedFromSearch: value }),
+    66→    66→}));
+    67→    67→
+    68→    68→interface WatchlistState {
+    69→    69→  items: ContentItem[];
+    70→    70→  addItem: (item: ContentItem) => void;
+    71→    71→  removeItem: (id: string | number) => void;
+    72→    72→  toggleItem: (item: ContentItem) => void;
+    73→    73→  isInList: (id: string | number) => boolean;
+    74→    74→  fetchFromServer: (token: string) => Promise<void>;
+    75→    75→  syncFromServer: () => Promise<void>;
+    76→    76→  pushToServer: (token: string) => Promise<void>;
+    77→    77→  /** Pending sync counter — prevents rapid mutations from silently dropping server syncs.
+    78→    78→   *  Unlike a boolean lock, a counter ensures every mutation gets synced eventually. */
+    79→    79→  _pendingSyncs: number;
+    80→    80→}
+    81→    81→
+    82→    82→export const useWatchlistStore = create<WatchlistState>()(
+    83→    83→  persist(
+    84→    84→    (set, get) => ({
+    85→    85→      items: [],
+    86→    86→      _pendingSyncs: 0,
+    87→    87→
+    88→    88→      addItem: (item) => {
+    89→    89→        set((s) => ({ items: [...s.items.filter((i) => String(i.id) !== String(item.id)), item] }));
+    90→    90→        get()._syncToServerBackground();
+    91→    91→      },
+    92→    92→
+    93→    93→      removeItem: (id) => {
+    94→    94→        set((s) => ({ items: s.items.filter((i) => String(i.id) !== String(id)) }));
+    95→    95→        get()._syncToServerBackground();
+    96→    96→      },
+    97→    97→
+    98→    98→      toggleItem: (item) => {
+    99→    99→        const { items } = get();
+   100→   100→        if (items.some((i) => String(i.id) === String(item.id))) {
+   101→   101→          set({ items: items.filter((i) => String(i.id) !== String(item.id)) });
+   102→   102→        } else {
+   103→   103→          set({ items: [...items, item] });
+   104→   104→        }
+   105→   105→        get()._syncToServerBackground();
+   106→   106→      },
+   107→   107→
+   108→   108→      isInList: (id) => get().items.some((i) => String(i.id) === String(id)),
+   109→   109→
+   110→   110→      /** Fire-and-forget sync to server after local mutation.
+   111→   111→       *  Uses a pending counter (not boolean) so rapid mutations don't silently
+   112→   112→       *  drop syncs. Each mutation increments the counter; the sync loop
+   113→   113→       *  decrements after push and re-pushes until the counter reaches zero. */
+   114→   114→      _syncToServerBackground: async () => {
+   115→   115→        const current = get();
+   116→   116→        set({ _pendingSyncs: current._pendingSyncs + 1 });
+   117→   117→
+   118→   118→        // If a sync is already in-flight, just increment — it will re-check
+   119→   119→        if (current._pendingSyncs > 1) return;
+   120→   120→
+   121→   121→        try {
+   122→   122→          let pending = get()._pendingSyncs;
+   123→   123→          while (pending > 0) {
+   124→   124→            const token = await getAuthToken();
+   125→   125→            if (!token) break;
+   126→   126→            await get().pushToServer(token);
+   127→   127→            pending = get()._pendingSyncs;
+   128→   128→            // Only clear if no new mutations arrived during the push
+   129→   129→            if (pending <= 1) {
+   130→   130→              set({ _pendingSyncs: 0 });
+   131→   131→              break;
+   132→   132→            }
+   133→   133→            // New mutations arrived — decrement by 1 (this sync consumed one)
+   134→   134→            // and loop to push the updated state
+   135→   135→            set({ _pendingSyncs: pending - 1 });
+   136→   136→          }
+   137→   137→        } catch {
+   138→   138→          // Sync failed — localStorage is the fallback. Reset counter
+   139→   139→          // so the next mutation will trigger a fresh sync attempt.
+   140→   140→          set({ _pendingSyncs: 0 });
+   141→   141→        }
+   142→   142→      },
+   143→   143→
+   144→   144→      /** Fetch watchlist from server and merge with local */
+   145→   145→      fetchFromServer: async (token) => {
+   146→   146→        try {
+   147→   147→          const res = await fetch('/api/watchlist', {
+   148→   148→            headers: { Authorization: `Bearer ${token}` },
+   149→   149→          });
+   150→   150→          if (!res.ok) {
+   151→   151→            // Token might have gone stale — refresh and retry once
+   152→   152→            const fresh = await getAuthToken();
+   153→   153→            if (!fresh || fresh === token) return;
+   154→   154→            const retry = await fetch('/api/watchlist', {
+   155→   155→              headers: { Authorization: `Bearer ${fresh}` },
+   156→   156→            });
+   157→   157→            if (!retry.ok) return;
+   158→   158→            const retryJson = await retry.json();
+   159→   159→            if (retryJson.tableMissing) return;
+   160→   160→            const retryItems = (retryJson.items ?? []) as ContentItem[];
+   161→   161→            if (retryItems.length > 0) set({ items: retryItems });
+   162→   162→            return;
+   163→   163→          }
+   164→   164→          const json = await res.json();
+   165→   165→          if (json.tableMissing) return;
+   166→   166→          const serverItems = (json.items ?? []) as ContentItem[];
+   167→   167→          if (serverItems.length > 0) {
+   168→   168→            set({ items: serverItems });
+   169→   169→          }
+   170→   170→        } catch { /* silent — localStorage is the fallback */ }
+   171→   171→      },
+   172→   172→
+   173→   173→      /** Fetch from server using current session (no external token needed) */
+   174→   174→      syncFromServer: async () => {
+   175→   175→        const token = await getAuthToken();
+   176→   176→        if (!token) return;
+   177→   177→        await get().fetchFromServer(token);
+   178→   178→      },
+   179→   179→
+   180→   180→      /** Push current local watchlist to server (full replace) */
+   181→   181→      pushToServer: async (token) => {
+   182→   182→        try {
+   183→   183→          const res = await fetch('/api/watchlist', {
+   184→   184→            method: 'PUT',
+   185→   185→            headers: {
+   186→   186→              Authorization: `Bearer ${token}`,
+   187→   187→              'Content-Type': 'application/json',
+   188→   188→            },
+   189→   189→            body: JSON.stringify({ items: get().items }),
+   190→   190→          });
+   191→   191→          if (!res.ok) {
+   192→   192→            // Token might have gone stale mid-flight — refresh and retry once
+   193→   193→            const fresh = await getAuthToken();
+   194→   194→            if (!fresh || fresh === token) return;
+   195→   195→            await fetch('/api/watchlist', {
+   196→   196→              method: 'PUT',
+   197→   197→              headers: {
+   198→   198→                Authorization: `Bearer ${fresh}`,
+   199→   199→                'Content-Type': 'application/json',
+   200→   200→              },
+   201→   201→              body: JSON.stringify({ items: get().items }),
+   202→   202→            });
+   203→   203→          }
+   204→   204→        } catch { /* silent — localStorage is the fallback */ }
+   205→   205→      },
+   206→   206→    }),
+   207→   207→    { name: 'movera-watchlist', partialize: (s) => ({ items: s.items }) }
+   208→   208→  )
+   209→   209→);
+   210→   210→
+   211→   211→/* Auth token helper re-exported from canonical location (session-manager.ts).
+   212→   212→   Imported locally (above) so store internals can call getAuthToken().
+   213→   213→   Re-exported here so other modules import from store. */
+   214→   214→export { getAuthToken };
+   215→   215→
+   216→   216→const MAX_PROGRESS_ENTRIES = 100;
+   217→   217→
+   218→   218→interface ProgressState {
+   219→   219→  progress: WatchProgress[];
+   220→   220→  updateProgress: (entry: WatchProgress) => void;
+   221→   221→  getProgress: (contentId: string | number, season?: number, episode?: number) => WatchProgress | undefined;
+   222→   222→  removeProgress: (contentId: string | number, season?: number, episode?: number) => void;
+   223→   223→}
+   224→   224→
+   225→   225→export const useProgressStore = create<ProgressState>()(
+   226→   226→  persist(
+   227→   227→    (set, get) => ({
+   228→   228→      progress: [],
+   229→   229→      updateProgress: (entry) =>
+   230→   230→        set((s) => {
+   231→   231→          const filtered = s.progress.filter(
+   232→   232→            (p) =>
+   233→   233→              !(
+   234→   234→                String(p.contentId) === String(entry.contentId) &&
+   235→   235→                p.season === entry.season &&
+   236→   236→                p.episode === entry.episode
+   237→   237→              )
+   238→   238→          );
+   239→   239→          const updated = [...filtered, entry];
+   240→   240→          // Cap at MAX_PROGRESS_ENTRIES — remove oldest entries first
+   241→   241→          // to prevent unbounded localStorage growth over time
+   242→   242→          if (updated.length > MAX_PROGRESS_ENTRIES) {
+   243→   243→            updated.splice(0, updated.length - MAX_PROGRESS_ENTRIES);
+   244→   244→          }
+   245→   245→          return { progress: updated };
+   246→   246→        }),
+   247→   247→      getProgress: (contentId, season, episode) =>
+   248→   248→        get().progress.find(
+   249→   249→          (p) =>
+   250→   250→            String(p.contentId) === String(contentId) &&
+   251→   251→            p.season === season &&
+   252→   252→            p.episode === episode
+   253→   253→        ),
+   254→   254→      removeProgress: (contentId, season, episode) =>
+   255→   255→        set((s) => ({
+   256→   256→          progress: s.progress.filter(
+   257→   257→            (p) =>
+   258→   258→              !(
+   259→   259→                String(p.contentId) === String(contentId) &&
+   260→   260→                p.season === season &&
+   261→   261→                p.episode === episode
+   262→   262→              )
+   263→   263→          ),
+   264→   264→        })),
+   265→   265→    }),
+   266→   266→    { name: 'movera-progress' }
+   267→   267→  )
+   268→   268→);
+   269→   269→
+   270→   270→interface UIState {
+   271→   271→  searchQuery: string;
+   272→   272→  isSearchOpen: boolean;
+   273→   273→  isDownloadPanelOpen: boolean;
+   274→   274→  savedSearchQuery: string;
+   275→   275→  savedSearchResults: ContentItem[];
+   276→   276→  savedSearchFilters: import('@/services/api').SearchFilters;
+   277→   277→  setSearchQuery: (q: string) => void;
+   278→   278→  setSearchOpen: (open: boolean) => void;
+   279→   279→  setDownloadPanelOpen: (open: boolean) => void;
+   280→   280→  saveSearchState: (query: string, results: ContentItem[], filters?: import('@/services/api').SearchFilters) => void;
+   281→   281→  clearSavedSearch: () => void;
+   282→   282→}
+   283→   283→
+   284→   284→export const useUIStore = create<UIState>((set) => ({
+   285→   285→  searchQuery: '',
+   286→   286→  isSearchOpen: false,
+   287→   287→  isDownloadPanelOpen: false,
+   288→   288→  savedSearchQuery: '',
+   289→   289→  savedSearchResults: [],
+   290→   290→  savedSearchFilters: {},
+   291→   291→  setSearchQuery: (q) => set({ searchQuery: q }),
+   292→   292→  setSearchOpen: (open) => set({ isSearchOpen: open }),
+   293→   293→  setDownloadPanelOpen: (open) => set({ isDownloadPanelOpen: open }),
+   294→   294→  saveSearchState: (query, results, filters) => set({ savedSearchQuery: query, savedSearchResults: results, savedSearchFilters: filters || {} }),
+   295→   295→  clearSavedSearch: () => set({ savedSearchQuery: '', savedSearchResults: [], savedSearchFilters: {} }),
+   296→   296→}));
+   297→   297→
+   298→   298→// ── Auth Store ─────────────────────────────────────────────
+   299→   299→// Supabase-backed authentication + profile state.
+   300→   300→// Session is persisted by Supabase client in localStorage.
+   301→   301→// Profile is fetched from DB on session restore.
+   302→   302→
+   303→   303→import type { User, Session } from '@supabase/supabase-js';
+   304→   304→import type { ProfileRow } from '@/types/supabase';
+   305→   305→
+   306→   306→export type AuthStatus = 'loading' | 'unauthenticated' | 'authenticated' | 'needs_profile';
+   307→   307→
+   308→   308→const OFFLINE_PROFILE_KEY = 'movera-cached-profile';
+   309→   309→const SUPABASE_SESSION_KEY = 'movera-auth-token';
+   310→   310→
+   311→   311→function cacheProfileOffline(profile: ProfileRow | null) {
+   312→   312→  if (typeof window === 'undefined') return;
+   313→   313→  if (profile) {
+   314→   314→    try { localStorage.setItem(OFFLINE_PROFILE_KEY, JSON.stringify(profile)); } catch { /* ignore */ }
+   315→   315→  } else {
+   316→   316→    try { localStorage.removeItem(OFFLINE_PROFILE_KEY); } catch { /* ignore */ }
+   317→   317→  }
+   318→   318→}
+   319→   319→
+   320→   320→function getCachedProfile(): ProfileRow | null {
+   321→   321→  if (typeof window === 'undefined') return null;
+   322→   322→  try {
+   323→   323→    const raw = localStorage.getItem(OFFLINE_PROFILE_KEY);
+   324→   324→    return raw ? JSON.parse(raw) : null;
+   325→   325→  } catch { return null; }
+   326→   326→}
+   327→   327→
+   328→   328→interface AuthState {
+   329→   329→  status: AuthStatus;
+   330→   330→  user: User | null;
+   331→   331→  session: Session | null;
+   332→   332→  profile: ProfileRow | null;
+   333→   333→  isOffline: boolean;
+   334→   334→
+   335→   335→  // Actions
+   336→   336→  setAuth: (user: User | null, session: Session | null) => void;
+   337→   337→  setProfile: (profile: ProfileRow | null) => void;
+   338→   338→  setStatus: (status: AuthStatus) => void;
+   339→   339→  setOffline: (offline: boolean) => void;
+   340→   340→  bootstrapFromCache: () => void;
+   341→   341→  logout: () => Promise<void>;
+   342→   342→}
+   343→   343→
+   344→   344→export const useAuthStore = create<AuthState>((set, get) => ({
+   345→   345→    status: 'loading' as AuthStatus,
+   346→   346→    user: null,
+   347→   347→    session: null,
+   348→   348→    profile: null,
+   349→   349→    isOffline: false,
+   350→   350→
+   351→   351→    setAuth: (user, session) => set({ user, session }),
+   352→   352→    setProfile: (profile) => {
+   353→   353→      // Only cache non-null profiles — don't delete the cached profile
+   354→   354→      // when a DB fetch fails (RLS/406/network). Only logout() should clear it.
+   355→   355→      if (profile) {
+   356→   356→        cacheProfileOffline(profile);
+   357→   357→        // Cache avatar image blob for offline display (fire-and-forget)
+   358→   358→        if (profile.avatar_url) {
+   359→   359→          const userId = get().user?.id;
+   360→   360→          if (userId) {
+   361→   361→            (async () => {
+   362→   362→              try {
+   363→   363→                const { saveAvatar } = await import('@/lib/download-storage');
+   364→   364→                const resp = await fetch(profile.avatar_url);
+   365→   365→                if (resp.ok) {
+   366→   366→                  const blob = await resp.blob();
+   367→   367→                  await saveAvatar(userId, blob);
+   368→   368→                }
+   369→   369→              } catch { /* avatar caching failed — non-critical */ }
+   370→   370→            })();
+   371→   371→          }
+   372→   372→        }
+   373→   373→      }
+   374→   374→      set({ profile });
+   375→   375→    },
+   376→   376→    setStatus: (status) => set({ status }),
+   377→   377→    setOffline: (isOffline) => set({ isOffline }),
+   378→   378→    bootstrapFromCache: () => {
+   379→   379→      if (typeof window === 'undefined') return;
+   380→   380→      try {
+   381→   381→        const sessionRaw = localStorage.getItem(SUPABASE_SESSION_KEY);
+   382→   382→        if (!sessionRaw) { set({ status: 'unauthenticated' }); return; }
+   383→   383→        const session = JSON.parse(sessionRaw);
+   384→   384→        // Validate session structure — must have access_token and a user object
+   385→   385→        // with user_metadata. Corrupted data should not gate the user.
+   386→   386→        if (!session || typeof session !== 'object') {
+   387→   387→          set({ status: 'unauthenticated' }); return;
+   388→   388→        }
+   389→   389→        const accessToken = session?.access_token;
+   390→   390→        if (!accessToken || typeof accessToken !== 'string') {
+   391→   391→          set({ status: 'unauthenticated' }); return;
+   392→   392→        }
+   393→   393→        // Validate user_metadata is an object (not null/undefined/corrupted)
+   394→   394→        const userMeta = session?.user?.user_metadata;
+   395→   395→        const metaCompleted = !!(userMeta && typeof userMeta === 'object' && userMeta.profile_completed);
+   396→   396→
+   397→   397→        const cached = getCachedProfile();
+   398→   398→        const cachedHasName = cached && typeof cached.display_name === 'string' && cached.display_name.trim().length > 0;
+   399→   399→
+   400→   400→        if (cachedHasName || metaCompleted) {
+   401→   401→          set({ status: 'authenticated', profile: cached, isOffline: !navigator.onLine });
+   402→   402→        } else {
+   403→   403→          // Session exists but no proof of profile completion.
+   404→   404→          // Never stay at loading — set needs_profile so the user
+   405→   405→          // can complete their profile immediately. validateSession()
+   406→   406→          // will correct to authenticated if DB returns a profile.
+   407→   407→          set({ status: 'needs_profile', isOffline: !navigator.onLine });
+   408→   408→        }
+   409→   409→      } catch {
+   410→   410→        // JSON parse error or localStorage access failure — treat as unauthenticated
+   411→   411→        set({ status: 'unauthenticated' });
+   412→   412→      }
+   413→   413→    },
+   414→   414→    logout: async () => {
+   415→   415→      try {
+   416→   416→        // Destroy session in DB BEFORE signing out of Supabase.
+   417→   417→        const { destroySession } = await import('@/lib/session-manager');
+   418→   418→        await destroySession();
+   419→   419→      } catch {
+   420→   420→        // destroySession failed — still clear local state
+   421→   421→      }
+   422→   422→
+   423→   423→      // ── Clear ALL localStorage auth artifacts BEFORE anything else ──
+   424→   424→      // This is the definitive kill. supabase.auth.signOut() can fail
+   425→   425→      // silently (network error, GoTrue race, autoRefreshToken re-writing).
+   426→   426→      // If it fails, the stale token persists and bootstrapFromCache()
+   427→   427→      // restores auth state on the next refresh → user appears logged in.
+   428→   428→      // By clearing localStorage explicitly, bootstrapFromCache() always
+   429→   429→      // finds nothing, regardless of whether signOut() succeeds.
+   430→   430→      try {
+   431→   431→        if (typeof window !== 'undefined') {
+   432→   432→          localStorage.removeItem(SUPABASE_SESSION_KEY);
+   433→   433→          localStorage.removeItem('sv_device_session_id');
+   434→   434→        }
+   435→   435→      } catch { /* localStorage access failure — non-critical */ }
+   436→   436→
+   437→   437→      // Clear cached profile (already cleared localStorage above)
+   438→   438→      cacheProfileOffline(null);
+   439→   439→
+   440→   440→      // Clear Zustand volatile state (not persisted — in-memory only)
+   441→   441→      set({ user: null, session: null, profile: null, status: 'unauthenticated', isOffline: false });
+   442→   442→
+   443→   443→      // Stop GoTrue autoRefreshToken timer + clear in-memory session.
+   444→   444→      // Must happen AFTER localStorage is cleared to prevent a concurrent
+   445→   445→      // refresh from re-writing the token between our removeItem() and here.
+   446→   446→      try {
+   447→   447→        const { supabase } = await import('@/lib/supabase');
+   448→   448→        await supabase.auth.signOut({ scope: 'local' });
+   449→   449→      } catch {
+   450→   450→        // signOut failed — localStorage already cleared, state already wiped
+   451→   451→      }
+   452→   452→
+   453→   453→      // Null the singleton so the next getSession() creates a fresh client
+   454→   454→      // with no in-memory session cache. Without this, the old client's
+   455→   455→      // getSession() could return a stale in-memory session.
+   456→   456→      try {
+   457→   457→        const { resetSupabaseClient } = await import('@/lib/supabase');
+   458→   458→        resetSupabaseClient();
+   459→   459→      } catch { /* non-critical */ }
+   460→   460→    },
+   461→   461→}));
+   462→   462→
+   463→   463→export { getCachedProfile };
+   464→   464→
+   465→   465→// ── Download Store ─────────────────────────────────────────
+   466→   466→import type { DownloadTask } from '@/lib/hls-downloader';
+   467→   467→import { deleteBlob as deleteBlobFromStorage, deletePoster } from '@/lib/download-storage';
+   468→   468→
+   469→   469→// Per-task progress throttle: max ~4 updates/sec to avoid flooding Zustand.
+   470→   470→// Each update creates a new tasks[] → triggers every subscriber (DownloadBadge
+   471→   471→// on every card, DownloadPanel, DownloadButton). Without throttling, a download
+   472→   472→// at 5MB/sec fires 30-60 state updates per second, re-rendering the entire tree.
+   473→   473→const _progressTimers = new Map<string, ReturnType<typeof setTimeout>>();
+   474→   474→const _progressPending = new Map<string, Partial<DownloadTask>>();
+   475→   475→
+   476→   476→function scheduleProgressUpdate(
+   477→   477→  id: string,
+   478→   478→  updates: Partial<DownloadTask>,
+   479→   479→  set: (fn: (s: DownloadState) => Partial<DownloadState>) => void,
+   480→   480→) {
+   481→   481→  _progressPending.set(id, { ...(_progressPending.get(id) ?? {}), ...updates });
+   482→   482→
+   483→   483→  // If no timer is running, schedule one (~250ms = ~4 updates/sec)
+   484→   484→  if (!_progressTimers.has(id)) {
+   485→   485→    _progressTimers.set(id, setTimeout(() => {
+   486→   486→      const pending = _progressPending.get(id);
+   487→   487→      _progressTimers.delete(id);
+   488→   488→      _progressPending.delete(id);
+   489→   489→      if (!pending) return;
+   490→   490→      set((s) => ({
+   491→   491→        tasks: s.tasks.map((t) => (t.id === id ? { ...t, ...pending } : t)),
+   492→   492→      }));
+   493→   493→    }, 250));
+   494→   494→  }
+   495→   495→}
+   496→   496→
+   497→   497→// Final flush — called when download completes/errors (bypass throttle)
+   498→   498→function flushProgressUpdate(
+   499→   499→  id: string,
+   500→   500→  updates: Partial<DownloadTask>,
+   501→   501→  set: (fn: (s: DownloadState) => Partial<DownloadState>) => void,
+   502→   502→) {
+   503→   503→  const timer = _progressTimers.get(id);
+   504→   504→  if (timer) {
+   505→   505→    clearTimeout(timer);
+   506→   506→    _progressTimers.delete(id);
+   507→   507→  }
+   508→   508→  const pending = _progressPending.get(id) ?? {};
+   509→   509→  _progressPending.delete(id);
+   510→   510→  set((s) => ({
+   511→   511→    tasks: s.tasks.map((t) => (t.id === id ? { ...t, ...pending, ...updates } : t)),
+   512→   512→  }));
+   513→   513→}
+   514→   514→
+   515→   515→interface DownloadState {
+   516→   516→  tasks: DownloadTask[];
+   517→   517→  addTask: (task: DownloadTask) => void;
+   518→   518→  updateTask: (id: string, updates: Partial<DownloadTask>) => void;
+   519→   519→  removeTask: (id: string) => void;
+   520→   520→  getTask: (id: string) => DownloadTask | undefined;
+   521→   521→  getTaskForContent: (contentId: string | number, season?: number, episode?: number) => DownloadTask | undefined;
+   522→   522→  isContentDownloaded: (contentId: string | number) => boolean;
+   523→   523→  isContentDownloading: (contentId: string | number) => boolean;
+   524→   524→  getTotalDownloadedBytes: () => number;
+   525→   525→}
+   526→   526→
+   527→   527→export const useDownloadStore = create<DownloadState>()(
+   528→   528→  persist(
+   529→   529→    (set, get) => ({
+   530→   530→      tasks: [],
+   531→   531→      addTask: (task) =>
+   532→   532→        set((s) => {
+   533→   533→          // Replace existing task for same content+season+episode
+   534→   534→          const filtered = s.tasks.filter(
+   535→   535→            (t) =>
+   536→   536→              !(
+   537→   537→                String(t.contentId) === String(task.contentId) &&
+   538→   538→                t.season === task.season &&
+   539→   539→                t.episode === task.episode
+   540→   540→              )
+   541→   541→          );
+   542→   542→          return { tasks: [...filtered, task] };
+   543→   543→        }),
+   544→   544→      updateTask: (id, updates) => {
+   545→   545→        // Terminal states (completed/error) bypass throttle — flush immediately
+   546→   546→        if (updates.status === 'completed' || updates.status === 'error') {
+   547→   547→          flushProgressUpdate(id, updates, set);
+   548→   548→          return;
+   549→   549→        }
+   550→   550→        // In-flight progress updates: throttle to ~4/sec
+   551→   551→        if (updates.status === 'downloading') {
+   552→   552→          scheduleProgressUpdate(id, updates, set);
+   553→   553→          return;
+   554→   554→        }
+   555→   555→        // Non-progress updates (status changes like 'pending'): apply immediately
+   556→   556→        set((s) => ({
+   557→   557→          tasks: s.tasks.map((t) => (t.id === id ? { ...t, ...updates } : t)),
+   558→   558→        }));
+   559→   559→      },
+   560→   560→      removeTask: (id) =>
+   561→   561→        set((s) => {
+   562→   562→          // Find the task being removed to get its contentId for poster cleanup
+   563→   563→          const task = s.tasks.find((t) => t.id === id);
+   564→   564→          const contentId = task?.contentId;
+   565→   565→          // Clean up IndexedDB blob (fire-and-forget)
+   566→   566→          deleteBlobFromStorage(id).catch(() => {});
+   567→   567→          // Clean up poster if no other tasks share the same contentId
+   568→   568→          if (contentId !== undefined) {
+   569→   569→            const otherTasksWithSameContent = s.tasks.filter(
+   570→   570→              (t) => t.id !== id && String(t.contentId) === String(contentId)
+   571→   571→            );
+   572→   572→            if (otherTasksWithSameContent.length === 0) {
+   573→   573→              deletePoster(contentId).catch(() => {});
+   574→   574→            }
+   575→   575→          }
+   576→   576→          return { tasks: s.tasks.filter((t) => t.id !== id) };
+   577→   577→        }),
+   578→   578→      getTask: (id) => get().tasks.find((t) => t.id === id),
+   579→   579→      getTaskForContent: (contentId, season, episode) =>
+   580→   580→        get().tasks.find(
+   581→   581→          (t) =>
+   582→   582→            String(t.contentId) === String(contentId) &&
+   583→   583→            t.season === season &&
+   584→   584→            t.episode === episode
+   585→   585→        ),
+   586→   586→      isContentDownloaded: (contentId) =>
+   587→   587→        get().tasks.some(
+   588→   588→          (t) => String(t.contentId) === String(contentId) && t.status === 'completed'
+   589→   589→        ),
+   590→   590→      isContentDownloading: (contentId) =>
+   591→   591→        get().tasks.some(
+   592→   592→          (t) =>
+   593→   593→            String(t.contentId) === String(contentId) &&
+   594→   594→            (t.status === 'downloading' || t.status === 'pending')
+   595→   595→        ),
+   596→   596→      getTotalDownloadedBytes: () =>
+   597→   597→        get()
+   598→   598→          .tasks.filter((t) => t.status === 'completed')
+   599→   599→          .reduce((sum, t) => sum + t.downloadedBytes, 0),
+   600→   600→    }),
+   601→   601→    {
+   602→   602→      name: 'movera-downloads',
+   603→   603→      // Only persist the tasks array (data only — no functions).
+   604→   604→      // Spreading ...state includes functions which can interfere with
+   605→   605→      // persist middleware's internal diffing and merge behavior.
+   606→   606→      partialize: (state) => ({
+   607→   607→        tasks: state.tasks.map((t) => ({
+   608→   608→          ...t,
+   609→   609→          blob: undefined,
+   610→   610→        })),
+   611→   611→      }),
+   612→   612→      // Custom merge: always merge tasks, never wipe in-flight downloads.
+   613→   613→      // Default merge is shallow ({...current, ...persisted}) which is fine,
+   614→   614→      // but we keep this explicit to prevent future regressions.
+   615→   615→      merge: (persisted, current) => {
+   616→   616→        const pTasks = (persisted as Partial<DownloadState>)?.tasks;
+   617→   617→        return {
+   618→   618→          ...current,
+   619→   619→          ...(pTasks !== undefined ? { tasks: pTasks as DownloadTask[] } : {}),
+   620→   620→        };
+   621→   621→      },
+   622→   622→    }
+   623→   623→  )
+   624→   624→);
+   625→   625→
+   626→   626→// ── Settings Store ─────────────────────────────────────────
+   627→   627→// Device-level preferences persisted in localStorage.
+   628→   628→// These are client-side only — not synced to Supabase profiles table
+   629→   629→// because they're device-specific (e.g., download folder only makes
+   630→   630→// sense on the current device/browser).
+   631→   631→
+   632→   632→interface SettingsState {
+   633→   633→  /** Preferred subtitle language codes for automatic offline download.
+   634→   634→   *  When downloading a video, only subtitle tracks matching these
+   635→   635→   *  languages are downloaded. Empty array = download all available. */
+   636→   636→  preferredSubtitles: string[];
+   637→   637→
+   638→   638→  /** Display name of the user's chosen download folder (File System Access API).
+   639→   639→   *  null = not configured → downloads go to IndexedDB only. */
+   640→   640→  downloadFolderName: string | null;
+   641→   641→
+   642→   642→  // Actions
+   643→   643→  setPreferredSubtitles: (langs: string[]) => void;
+   644→   644→  setDownloadFolderName: (name: string | null) => void;
+   645→   645→  togglePreferredSubtitle: (lang: string) => void;
+   646→   646→  isSubtitlePreferred: (lang: string) => boolean;
+   647→   647→}
+   648→   648→
+   649→   649→export const useSettingsStore = create<SettingsState>()(
+   650→   650→  persist(
+   651→   651→    (set, get) => ({
+   652→   652→      preferredSubtitles: [],
+   653→   653→      downloadFolderName: null,
+   654→   654→
+   655→   655→      setPreferredSubtitles: (langs) => set({ preferredSubtitles: langs }),
+   656→   656→      setDownloadFolderName: (name) => set({ downloadFolderName: name }),
+   657→   657→      togglePreferredSubtitle: (lang) => {
+   658→   658→        const current = get().preferredSubtitles;
+   659→   659→        if (current.includes(lang)) {
+   660→   660→          set({ preferredSubtitles: current.filter((l) => l !== lang) });
+   661→   661→        } else {
+   662→   662→          set({ preferredSubtitles: [...current, lang] });
+   663→   663→        }
+   664→   664→      },
+   665→   665→      isSubtitlePreferred: (lang) => {
+   666→   666→        const { preferredSubtitles } = get();
+   667→   667→        // Empty list = all languages preferred (download everything available)
+   668→   668→        return preferredSubtitles.length === 0 || preferredSubtitles.includes(lang);
+   669→   669→      },
+   670→   670→    }),
+   671→   671→    {
+   672→   672→      name: 'movera-settings',
+   673→   673→      partialize: (s) => ({
+   674→   674→        preferredSubtitles: s.preferredSubtitles,
+   675→   675→        downloadFolderName: s.downloadFolderName,
+   676→   676→      }),
+   677→   677→    }
+   678→   678→  )
+   679→   679→);
+   680→   680→

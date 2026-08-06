@@ -15,7 +15,7 @@ import {
   fetchPopular,
   fetchGenres,
 } from '@/services/api';
-import { supabase, getMyProfile, initSupabase, touchProfile } from '@/lib/supabase';
+import { supabase, getMyProfile, initSupabase, touchProfile, refreshSession, isSessionTokenExpired } from '@/lib/supabase';
 import { startHeartbeat, stopHeartbeat, registerSession, heartbeatSession, getAuthToken } from '@/lib/session-manager';
 import { unregisterPlayback as unregisterPlaybackSync } from '@/lib/hls-memory-loader';
 import { getCachedProfile } from '@/store';
@@ -319,6 +319,47 @@ export default function MoveraApp({ supabaseUrl, supabaseAnonKey }: MoveraAppPro
               }
             } catch { /* ignore parse errors */ }
           }
+
+          // ── SESSION RECOVERY: attempt refresh before hard logout ──
+          // After long PWA inactivity, GoTrue's in-memory session is null
+          // but the refresh_token in localStorage may still be valid.
+          // Attempt a refresh before giving up — this is the primary fix
+          // for the "PWA logs out after long inactivity" issue.
+          if (navigator.onLine) {
+            console.warn('[AUTH] getSession() returned null, attempting session refresh before logout');
+            const { session: refreshed, error: refreshError } = await refreshSession();
+            if (refreshed && refreshed.access_token && refreshed.user) {
+              // Refresh succeeded — restore auth state
+              console.warn('[AUTH] session refresh succeeded — restored auth state');
+              if (mounted) setAuth(refreshed.user, refreshed);
+              const metaCompleted = !!refreshed.user.user_metadata?.profile_completed;
+              const profile = await getMyProfile();
+              if (!mounted) return;
+              setProfile(profile);
+              if (metaCompleted || (profile && profile.display_name.trim().length > 0)) {
+                setStatus('authenticated');
+                if (refreshed.access_token) {
+                  fetchWatchlistFromServer(refreshed.access_token);
+                  touchProfile(profile?.updated_at);
+                }
+              } else {
+                setStatus('needs_profile');
+              }
+              return;
+            }
+
+            // Refresh failed — the refresh_token is expired/revoked.
+            // This is a genuine "session expired" situation.
+            console.warn('[AUTH] session refresh failed:', refreshError, '→ transitioning to unauthenticated');
+            if (mounted) {
+              toast.error('Session expired. Please sign in again.', { duration: 4000 });
+              setProfile(null);
+              setStatus('unauthenticated');
+            }
+            return;
+          }
+
+          // Offline + no cached session → can't refresh, go unauthenticated
           if (mounted) {
             setProfile(null);
             setStatus('unauthenticated');
@@ -382,6 +423,41 @@ export default function MoveraApp({ supabaseUrl, supabaseAnonKey }: MoveraAppPro
     const goOffline = () => setOffline(true);
     const goOnline = () => {
       setOffline(false);
+
+      // When coming back online after extended offline, the session
+      // may have expired. Attempt recovery if unauthenticated or if
+      // the token is expired. This handles the "PWA wakes from sleep
+      // with expired JWT" scenario.
+      const currentStatus = useAuthStore.getState().status;
+
+      if (currentStatus === 'unauthenticated' || isSessionTokenExpired()) {
+        // Give the network a moment to stabilize (DNS, TCP warmup)
+        // before attempting auth recovery. Without this, the first
+        // request can fail with "connection lost" on some devices.
+        setTimeout(async () => {
+          if (!navigator.onLine) return; // went offline again
+          const { session: refreshed, error: refreshError } = await refreshSession();
+          if (refreshed && refreshed.access_token && refreshed.user) {
+            useAuthStore.getState().setAuth(refreshed.user, refreshed);
+            const profile = await getMyProfile();
+            if (profile) {
+              useAuthStore.getState().setProfile(profile);
+              const metaCompleted = !!refreshed.user.user_metadata?.profile_completed;
+              if (metaCompleted || profile.display_name.trim().length > 0) {
+                useAuthStore.getState().setStatus('authenticated');
+                if (refreshed.access_token) {
+                  fetchWatchlistFromServer(refreshed.access_token);
+                }
+              } else {
+                useAuthStore.getState().setStatus('needs_profile');
+              }
+            }
+          }
+        }, 1500);
+        return;
+      }
+
+      // Normal online recovery — just re-sync profile
       supabase.auth.getSession().then(async ({ data: { session } }) => {
         if (!session) return;
         try {

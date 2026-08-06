@@ -242,6 +242,51 @@ export function startHeartbeat(onEvicted: () => void): () => void {
       return;
     }
 
+    // ── Check if JWT expired while PWA was backgrounded ──────
+    // When the PWA is backgrounded for hours/days, GoTrue's
+    // auto-refresh timer stops (browser throttles JS execution).
+    // The JWT expires but GoTrue never refreshed it. When the
+    // user opens the PWA again, we need to attempt a refresh
+    // before checking session validity, otherwise we'll get
+    // a false eviction and the user gets logged out.
+    try {
+      const raw = localStorage.getItem(SUPABASE_SESSION_STORAGE_KEY);
+      if (raw) {
+        const session = JSON.parse(raw);
+        const token = session?.access_token;
+        if (token && typeof token === 'string') {
+          const payloadB64 = token.split('.')[1];
+          if (payloadB64) {
+            const payload = JSON.parse(atob(payloadB64));
+            const isExpired = Date.now() >= payload.exp * 1000;
+            if (isExpired && navigator.onLine) {
+              // Token expired while backgrounded — attempt refresh.
+              // Wait a moment for network to stabilize after wake.
+              console.warn('[AUTH] visibility wake: JWT expired while backgrounded, attempting refresh');
+              await new Promise((r) => setTimeout(r, 800));
+              if (!navigator.onLine) return; // went offline again
+
+              const { supabase } = await import('@/lib/supabase');
+              const { data, error } = await supabase.auth.refreshSession();
+              if (error || !data.session) {
+                // Refresh failed — refresh_token also expired.
+                // This is a genuine session expiry, not a network glitch.
+                // Signal eviction so MoveraApp handles it gracefully.
+                console.warn('[AUTH] visibility wake: refresh failed:', error?.message, '→ evicting session');
+                onEvicted();
+                return;
+              }
+              // Refresh succeeded — session is now valid, continue
+              console.warn('[AUTH] visibility wake: refresh succeeded, session restored');
+            }
+          }
+        }
+      }
+    } catch {
+      // JWT decode or refresh failed — don't evict on parse errors.
+      // The heartbeat below will determine actual session state.
+    }
+
     const result = await heartbeatSession();
     if (result && !result.active && result.evicted) {
       // Only evict if the server explicitly confirms eviction.
